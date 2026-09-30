@@ -414,9 +414,9 @@ function severePacing(pacing){
 // Trouble REASON taxonomy — drives the "filter by issue" chips under the Pacing Trouble button. Each
 // troubled campaign carries one or more of these keys (see troubleReasonsFor in PacingDashboard). Order =
 // display order; label = chip text; color = chip accent (matches the KPI conventions used elsewhere).
-const TROUBLE_REASON_ORDER  = ["pace","ctr","cpm","vcr","goalhit","freq","rate","dark"];
-const TROUBLE_REASON_LABEL  = { pace:"Pacing", ctr:"CTR", cpm:"CPM", vcr:"Completion", goalhit:"Hit goal early", freq:"Frequency", rate:"No rate", dark:"Went dark" };
-const TROUBLE_REASON_COLOR  = { pace:"#ef4444", ctr:"#f59e0b", cpm:"#f97316", vcr:"#a855f7", goalhit:"#00d48a", freq:"#eab308", rate:"#ef4444", dark:"#ef4444" };
+const TROUBLE_REASON_ORDER  = ["pace","capped","ctr","cpm","vcr","goalhit","freq","rate","dark"];
+const TROUBLE_REASON_LABEL  = { pace:"Pacing", capped:"Capped", ctr:"CTR", cpm:"CPM", vcr:"Completion", goalhit:"Hit goal early", freq:"Frequency", rate:"No rate", dark:"Went dark" };
+const TROUBLE_REASON_COLOR  = { pace:"#ef4444", capped:"#ef4444", ctr:"#f59e0b", cpm:"#f97316", vcr:"#a855f7", goalhit:"#00d48a", freq:"#eab308", rate:"#ef4444", dark:"#ef4444" };
 function loadCustomPlatforms() { try{const s=localStorage.getItem(CUSTOM_PLATFORMS_KEY);return s?JSON.parse(s):{platforms:[],colors:{}}}catch{return{platforms:[],colors:{}}}}
 function saveCustomPlatforms(d){try{localStorage.setItem(CUSTOM_PLATFORMS_KEY,JSON.stringify(d))}catch(e){}}
 // ALL_PLATFORMS stays as a live array that includes custom additions
@@ -835,6 +835,12 @@ function normalizeTvsciUrl(u) {
   if (/\/pub\b/.test(u) && !/[?&]output=csv\b/.test(u)) u += (u.includes("?") ? "&" : "?") + "output=csv";
   return u;
 }
+
+// The Ambio Spend Report — the published-to-web Google Sheet the 💲 Spend sync pulls from by DEFAULT, so
+// every tracker (Austin's + Adam's) syncs the same source out of the box without anyone pasting a URL.
+// normalizeTvsciUrl() converts this /pubhtml link to the CSV endpoint at fetch time. A user can still
+// override it in the sync settings (their saved URL wins over this default).
+const DEFAULT_TVSCI_SHEET_URL = "https://docs.google.com/spreadsheets/u/1/d/e/2PACX-1vRZVjK3l7MMjIYLG1ogh16so4d6SRyp2G4Og0WTorZMaHaPyy0eNq9PSiQmGdyNThKjmKUI9S-qr81Y/pubhtml?gid=0&single=true";
 
 // ── Ambio campaign-name matching ── The TVsci sheet and the tracker label the SAME tactic differently
 // (sheet "UMass Amherst - Video RT" ↔ tracker "UMass Amherst - RT (TVSci Video)"). Normalize each name to
@@ -9947,6 +9953,21 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     const isFlt = !!flightGoalLabel(c);
     const tp = isFlt ? (flightPacingForTrouble(c, disp) || pacing) : pacing;
     if(dataUpdatedWithin(c, 4) && !!severePacing(tp)) out.push("pace");
+    // Capped — a spend FLIGHT whose synced daily budget is set too low to finish, even at 100% of the cap
+    // every remaining day. Mirrors the 💲 Spend view's isCappedSpend exactly: delivered = synced lifetime
+    // spend, Need/Day = (budget − delivered) ÷ days-left (aim ~1 day early), flagged only when Need/Day
+    // exceeds the daily budget by >15% (past Austin's deliberate finish-early over-budgeting).
+    if(isFlt && pacingMetricFor(c.platform, c.dealType)==="spend"){
+      const dbNum = parseFloat(c.tvsciDailyBudget)||0;
+      const dr = daysRemaining(c);   // null = no end date · <0 = ended
+      if(dbNum > 0 && dr !== null && dr >= 0){
+        const goalNum = parseGoalNumber(pacingGoalRaw(c));
+        const delivered = parseFloat(c.tvsciLifetimeSpend)||0;
+        const remaining = Math.max(0, goalNum - delivered);
+        const needPerDay = remaining / Math.max(1, dr - 1);
+        if(goalNum > 0 && needPerDay > dbNum * 1.15) out.push("capped");
+      }
+    }
     // Hit goal with days to spare — 100%+ of goal while still in flight with 4+ days left (over-serving
     // unbillable delivery). Active OR paused. Excludes ended flights. No freshness gate (a goal hit stays hit).
     if((c.status === "active" || c.status === "off") && tp && tp.pctRaw != null && tp.pctRaw >= 1.0){
@@ -11171,6 +11192,18 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       : npdPct >= 40 ? "#f59e0b"                     // light day → amber
       :                "#ef4444";                    // nearly went dark → red
 
+    // "Capped" — a spend flight whose synced Daily Budget is set too low to ever finish, even at 100% of the
+    // cap every remaining day. ONLY surfaced in the 💲 Spend view (it's spend-report/sync data, so it stays
+    // out of the Metrics view per the tab-separation rule), and ONLY on a MEANINGFUL shortfall: Need/Day must
+    // exceed the cap by >15%. That margin stays well clear of Austin's intentional "set the budget to finish a
+    // few days early" over-budgeting (which keeps Need/Day comfortably BELOW the cap), so the flag fires only
+    // on a real structural shortfall — not normal wiggle room. When true, Need/Day + Daily Budget both go red.
+    const _dbNum = parseFloat(c.tvsciDailyBudget) || 0;
+    const CAP_OVER_MARGIN = 1.15;
+    const isCappedSpend = spendOnly && metricKind === "spend" && _dbNum > 0 && npd != null && npd > _dbNum * CAP_OVER_MARGIN;
+    const cappedShortPct = isCappedSpend ? Math.round((1 - _dbNum / npd) * 100) : 0;
+    const _dbFmt = "$" + (_dbNum >= 1000 ? (_dbNum/1000).toFixed(1)+"k" : _dbNum.toFixed(0));
+
     // Weekly impressions + clicks for the combo chart in the expanded dropdown.
     // Derived from Quick Check-in history (metricSeries), current month only —
     // the series is MTD-cumulative and resets each month, so we diff consecutive
@@ -11188,7 +11221,11 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     const hasCreatives = !!(c.creativeReport && Array.isArray(c.creativeReport.creatives) && c.creativeReport.creatives.length);
     // Any campaign with delivery can expand — even with no chart history yet — so its dropdown always
     // offers the "Generate brief" action.
-    const canExpand = !!rowBreakdown || hasWeekly || hasCreatives || primaryRaw > 0;
+    // In the 💲 Spend view the dropdown shows ONLY the Ambio Spend Report detail (no check-in chart or
+    // per-line breakdown), so a row expands when it has synced spend data. Elsewhere it expands on
+    // chart/brief/check-in data as before. Keeps the two data sources fully separated per view.
+    const _hasSpendReport = (parseFloat(c.tvsciLifetimeSpend)||0) > 0 || (parseFloat(c.tvsciDailyBudget)||0) > 0 || (c.tvsciYesterdaySpend!=null && String(c.tvsciYesterdaySpend)!=="");
+    const canExpand = spendOnly ? _hasSpendReport : (!!rowBreakdown || hasWeekly || hasCreatives || primaryRaw > 0);
 
     return <React.Fragment>
     <div style={{display:"grid",gridTemplateColumns:spendOnly?GRID_SPEND:GRID,gap:8,padding:"9px 16px",borderBottom:canExpand&&rowBreakdownOpen?"none":"1px solid "+lmBrdR,alignItems:"center",background:lmBg,borderLeft:"3px solid "+col}}>
@@ -11200,15 +11237,17 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
         <div style={{fontSize:14,fontWeight:700,color:lmTxt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",display:"flex",alignItems:"center",gap:6}}>
           {canExpand&&(
             <button onClick={()=>setRowBreakdownOpen(v=>!v)}
-              title={rowBreakdown
-                ? `${rowBreakdown.length} CSV lines mapped${hasWeekly?" · weekly trend":""} — click to expand`
-                : "Weekly impressions vs. clicks trend — click to expand"}
+              title={spendOnly
+                ? "Ambio Spend Report detail — click to expand"
+                : (rowBreakdown
+                    ? `${rowBreakdown.length} CSV lines mapped${hasWeekly?" · weekly trend":""} — click to expand`
+                    : "Weekly impressions vs. clicks trend — click to expand")}
               style={{background:"none",border:"none",padding:0,cursor:"pointer",color:lightMode?"#84cdc4":"#b2cbc8",fontSize:10,fontWeight:700,flexShrink:0,display:"inline-block",transform:rowBreakdownOpen?"rotate(90deg)":"rotate(0deg)",transition:"transform .15s"}}>▸</button>
           )}
           <span onClick={canExpand?()=>setRowBreakdownOpen(v=>!v):undefined}
-            title={canExpand?"Click to open the daily/weekly chart":undefined}
+            title={canExpand?(spendOnly?"Click to open the Ambio Spend Report detail":"Click to open the daily/weekly chart"):undefined}
             style={{whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:canExpand?"pointer":"default"}}>{c.campaignName.trim()}</span>
-          {rowBreakdown&&<span style={{fontSize:9,color:lightMode?"#84cdc4":"#b2cbc8",background:lightMode?"#d5eae2":"#0b302c",borderRadius:3,padding:"0 4px",fontWeight:700,flexShrink:0}}>{rowBreakdown.length}</span>}
+          {!spendOnly&&rowBreakdown&&<span style={{fontSize:9,color:lightMode?"#84cdc4":"#b2cbc8",background:lightMode?"#d5eae2":"#0b302c",borderRadius:3,padding:"0 4px",fontWeight:700,flexShrink:0}}>{rowBreakdown.length}</span>}
         </div>
         <div style={{display:"flex",alignItems:"center",gap:6,overflow:"hidden"}}>
           {/* Full flight dates "M/D/YY - M/D/YY" (the user) — start neutral, END colour-coded by
@@ -11322,10 +11361,14 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
           : <span style={{fontSize:11,color:lmTxtD}}>—</span>}
       </div>
 
-      {/* Need/Day — impr/views/$ required per remaining day to hit goal */}
-      <div title={npd !== null ? `${npdFmt} ${metricKind==="spend"?"spend":metricKind==="views"?"views":"impr"}/day to finish ~1 day early · ${npdDaysActual}d left` : ""}>
+      {/* Need/Day — impr/views/$ required per remaining day to hit goal. In the 💲 Spend view, a line whose
+          Need/Day meaningfully exceeds its Daily Budget cap (see isCappedSpend) is structurally under-funded —
+          flag it red + ⚠ so it jumps out on a scan; the tooltip says how far short it lands at the cap. */}
+      <div title={npd !== null
+          ? `${npdFmt} ${metricKind==="spend"?"spend":metricKind==="views"?"views":"impr"}/day to finish ~1 day early · ${npdDaysActual}d left${isCappedSpend?`\nCapped — needs ${npdFmt}/day but the daily budget is only ${_dbFmt}, so even at 100% of cap it finishes ~${cappedShortPct}% short of pace. Raise the daily budget to deliver the full flight.`:""}`
+          : ""}>
         {npdFmt
-          ? <span style={{fontSize:11,fontWeight:700,color:lmC(npdCol)}}>{npdFmt}</span>
+          ? <span style={{fontSize:11,fontWeight:isCappedSpend?800:700,color:isCappedSpend?lmC("#ef4444"):lmC(npdCol)}}>{npdFmt}</span>
           : <span style={{fontSize:11,color:lmTxtD}}>—</span>}
       </div>
 
@@ -11373,10 +11416,12 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
           at a glance — the fastest tell for whether a line is spending in full. Blank until synced. */}
       {(()=>{
         const db = parseFloat(c.tvsciDailyBudget)||0;
+        // When the line is "capped" (Need/Day exceeds this budget by a meaningful margin), paint the budget
+        // red too so the need-vs-cap mismatch reads at a glance across the two adjacent columns.
         return (
-          <div title={db>0 ? "Campaign daily budget (from the Ambio spend sync) — the per-day cap yesterday's spend is measured against" : "No daily budget synced yet — drop the Ambio Spend Report in Quick Check-in"}>
+          <div title={db>0 ? (isCappedSpend ? `Daily budget ${_dbFmt} — too low to finish: Need/Day is ~${cappedShortPct}% above this cap. Raise it to deliver the full flight.` : "Campaign daily budget (from the Ambio spend sync) — the per-day cap yesterday's spend is measured against") : "No daily budget synced yet — drop the Ambio Spend Report in Quick Check-in"}>
             {db>0
-              ? <span style={{fontSize:11,fontWeight:700,color:lmC("#7dd3fc")}}>${db>=1000?(db/1000).toFixed(1)+"k":db.toFixed(0)}</span>
+              ? <span style={{fontSize:11,fontWeight:isCappedSpend?800:700,color:isCappedSpend?lmC("#ef4444"):lmC("#7dd3fc")}}>${db>=1000?(db/1000).toFixed(1)+"k":db.toFixed(0)}</span>
               : <span style={{fontSize:11,color:lmTxtD}}>—</span>}
           </div>
         );
@@ -11468,10 +11513,46 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
               style={{background:lightMode?"#e2f0ea":"none",border:lightMode?"1px solid #cededc":"none",borderRadius:4,color:lightMode?"#97bab6":"#8fbfb6",fontSize:13,padding:"2px 5px",cursor:"pointer",lineHeight:1}}>✕</button>}
       </div>
     </div>
+    {/* 💲 Spend view ONLY — Ambio Spend Report detail. Purely sync data (lifetime / daily budget /
+        yesterday / today, dated to the last TVsci sync). No check-in chart or per-line breakdown — those
+        live in the Metrics view. This is what keeps the two tabs cleanly separated. */}
+    {spendOnly && rowBreakdownOpen && (()=>{
+      const money = n => "$"+Math.round(n).toLocaleString("en-US");
+      const life  = parseFloat(c.tvsciLifetimeSpend)||0;
+      const daily = parseFloat(c.tvsciDailyBudget)||0;
+      const yest  = parseFloat(c.tvsciYesterdaySpend)||0;
+      const today = parseFloat(c.tvsciTodaySpend)||0;
+      const pct   = daily>0 ? yest/daily : null;
+      const yCol  = pct==null ? (lightMode?"#0f2e2a":"#e3edec")
+                  : pct>=0.7 ? (lightMode?"#047857":"#00d48a")
+                  : pct>=0.4 ? (lightMode?"#b45309":"#f59e0b")
+                  : (lightMode?"#dc2626":"#ef4444");
+      const sync  = (String(c.lastSpendSync||c.tvsciSpendAsOf||"").match(/^\d{4}-\d{2}-\d{2}/)||[""])[0];
+      const Stat = ({label,val,color})=>(
+        <div style={{display:"flex",flexDirection:"column",gap:1,minWidth:92}}>
+          <span style={{fontSize:9,textTransform:"uppercase",letterSpacing:"0.05em",color:lightMode?"#789e99":"#8fb3ad",fontWeight:700}}>{label}</span>
+          <span style={{fontSize:14,fontWeight:800,color:color||(lightMode?"#0f2e2a":"#e3edec")}}>{val}</span>
+        </div>
+      );
+      return (
+        <div style={{background:lightMode?"#e8f4ef":"#04100f",borderBottom:"1px solid "+lmBrdR,borderLeft:"3px solid "+col,padding:"10px 16px 11px 42px"}}>
+          <div style={{fontSize:9,color:lightMode?"#789e99":"#bfe3da",textTransform:"uppercase",letterSpacing:"0.06em",fontWeight:700,marginBottom:7}}>
+            📺 Ambio Spend Report{sync?` · synced ${fmtDate(sync)}`:" · not synced yet"}
+          </div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:24,alignItems:"flex-end"}}>
+            <Stat label="Lifetime spend" val={money(life)}/>
+            <Stat label="Daily budget"  val={daily>0?money(daily):"—"}/>
+            <Stat label="Yesterday"     val={pct!=null?`${money(yest)} · ${Math.round(pct*100)}% of budget`:money(yest)} color={yCol}/>
+            <Stat label="Today so far"  val={money(today)}/>
+          </div>
+        </div>
+      );
+    })()}
     {/* Performance brief — plain-language 1–2 sentence summary (deterministic, no AI), first thing in the
         expanded dropdown, on demand: the dropdown shows a "📝 Generate brief" button (the user only sends
-        these to clients, so it's not auto-shown on every campaign); clicking it reveals the sentence. */}
-    {rowBreakdownOpen && (
+        these to clients, so it's not auto-shown on every campaign); clicking it reveals the sentence.
+        Metrics-view only — the Spend view shows the spend-report panel above instead. */}
+    {!spendOnly && rowBreakdownOpen && (
       !briefOpen ? (
         <div style={{padding:"9px 16px",borderBottom:"1px solid "+lmBrdR,background:lightMode?"#e8f4ef":"#061917"}}>
           <button onClick={()=>setBriefOpen(true)}
@@ -11501,7 +11582,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
         spend for SEM / views for YT), color-coded by how that week tracked vs the
         expected weekly pace; line = weekly clicks (right axis). Built from Quick
         Check-in history, current month only. Sparse until check-ins accumulate. */}
-    {rowBreakdownOpen&&hasWeekly&&(()=>{
+    {!spendOnly&&rowBreakdownOpen&&hasWeekly&&(()=>{
       // Active series follows the Weekly/Daily toggle (both built from the same history above).
       const isDaily = chartView==="daily";
       const chartData = isDaily ? daily : weekly;
@@ -11647,7 +11728,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     {/* Expanded per-line breakdown — full-width row beneath the campaign row.
         Shows BOTH MTD totals AND a separate "yesterday delivered" column per line
         (today MTD − prior-day MTD), so you can see e.g. retargeting spent $0 yesterday. */}
-    {rowBreakdown&&rowBreakdownOpen&&(()=>{
+    {!spendOnly&&rowBreakdown&&rowBreakdownOpen&&(()=>{
       // YouTube campaigns lead with VIEWS (their primary KPI); everything else
       // leads with impressions. Falls back to impressions if no view data exists yet.
       const useViews = metricKind === "views" && rowBreakdown.some(b=>(b.videoViews||0)>0);
@@ -11781,7 +11862,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     {/* ── Creatives (per-ad) breakdown — from a dropped FB or Snapchat creative report (Quick Check-in). ──
         Purely informational: impressions / CTR / clicks / CPM / spend / quality|status per ad, plus
         gone-quiet, paused, CTR-drop and new-creative flags computed vs the PREVIOUS report. */}
-    {rowBreakdownOpen && c.creativeReport && Array.isArray(c.creativeReport.creatives) && c.creativeReport.creatives.length>0 && (()=>{
+    {!spendOnly && rowBreakdownOpen && c.creativeReport && Array.isArray(c.creativeReport.creatives) && c.creativeReport.creatives.length>0 && (()=>{
       const cr = c.creativeReport;
       const ads = [...cr.creatives].sort((a,b)=>(b.impressions||0)-(a.impressions||0));
       const totalImpr = ads.reduce((s,a)=>s+(a.impressions||0),0);
@@ -12953,7 +13034,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
         filter is on it's a view-scoped triage list, so we always use the unified sectioned table (flights
         pulled in via showFlightsHere on the ✈ Flights tab) — otherwise flight-only rendering would hide the
         flight troubles the badge counts. */}
-    {pacingView === "digest" ? renderDigest() : pacingView === "spend" && !troubleOnly ? renderLifetime(true) : pacingView === "lifetime" && !troubleOnly ? renderLifetime() : (<React.Fragment>
+    {pacingView === "digest" ? renderDigest() : pacingView === "spend" ? renderLifetime(true) : pacingView === "lifetime" && !troubleOnly ? renderLifetime() : (<React.Fragment>
     {/* Horizontal scroll wrapper — on a laptop the wide table (~1720px) gets cut off on the right; this
         lets you scroll right to the hidden columns. The header + every table section scroll together in
         sync so columns stay aligned. Only applied in table view — card view stays fully responsive. */}
@@ -17402,7 +17483,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
   // check-in flow as a manual drop (detect → filter to Ambio_* → match → review → Apply). The published
   // link is stored ONLY in this browser's localStorage — never in the app source — so the private URL
   // can't leak in the deployed build. Runs alongside manual Quick Check-ins; it doesn't replace them.
-  const [tvsciUrl, setTvsciUrl] = useState(()=>{ try{ return localStorage.getItem("tvsci-sheet-url") || ""; }catch{ return ""; } });
+  const [tvsciUrl, setTvsciUrl] = useState(()=>{ try{ return localStorage.getItem("tvsci-sheet-url") || DEFAULT_TVSCI_SHEET_URL; }catch{ return DEFAULT_TVSCI_SHEET_URL; } });
   const [tvsciSyncing, setTvsciSyncing] = useState(false);
   const [lastTvsciSync, setLastTvsciSync] = useState(()=>{ try{ return localStorage.getItem("tvsci-last-sync") || ""; }catch{ return ""; } });
   const setTvsciUrlSaved = (u)=>{ u = normalizeTvsciUrl(u); setTvsciUrl(u); try{ localStorage.setItem("tvsci-sheet-url", u); }catch{} };
@@ -24482,7 +24563,7 @@ export default function App() {
   useEffect(() => {
     const INTERVAL = 3 * 60 * 60 * 1000; // 3 hours
     const doSync = async () => {
-      let url = ""; try { url = localStorage.getItem("tvsci-sheet-url") || ""; } catch {}
+      let url = DEFAULT_TVSCI_SHEET_URL; try { url = localStorage.getItem("tvsci-sheet-url") || DEFAULT_TVSCI_SHEET_URL; } catch {}
       url = normalizeTvsciUrl(url);
       if (!url) return;
       try {
