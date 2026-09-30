@@ -19074,7 +19074,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
                     <div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 10px"}}>
                       <div style={{flex:1,minWidth:0}}>
                         <div style={{display:"flex",alignItems:"center",gap:4}}>
-                          <div style={{fontSize:11,color:isUnmatched?"#f59e0b":(_lm?"#0f172a":"#e3edec"),overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:isUnmatched?600:400,flex:1}} title={fileSource==="TradeDesk"?(ttdAdvName+" → "+name):name}>
+                          <div style={{fontSize:13,color:isUnmatched?"#f59e0b":(_lm?"#0f172a":"#e3edec"),overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:isUnmatched?700:600,flex:1}} title={fileSource==="TradeDesk"?(ttdAdvName+" → "+name):name}>
                             {isUnmatched?"⚠ ":""}{displayName||"—"}
                             {fileSource==="TradeDesk"&&name&&<span style={{fontSize:9,color:_lm?"#97bab6":"#8fbfb6",marginLeft:6}}>({name})</span>}
                           </div>
@@ -19193,7 +19193,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
                               )}
                             </div>
                             <select value={assigned} onChange={e=>{ const v=e.target.value; if(v==="__ignore__"){ addIgnore(name); assignRow(i,""); } else { assignRow(i, v); } }}
-                              style={{background:assigned?(_lm?"#ddf2ea":"#002e24"):isUnmatched?(_lm?"#fffbeb":"#1a0e00"):(_lm?"#e8f4ef":"#0b2522"),border:`1px solid ${assigned?(_lm?"#00c896":"#00c89640"):isUnmatched?"#f59e0b40":(_lm?"#c4e0d8":"#182f2c")}`,borderRadius:5,padding:"3px 7px",color:assigned?(_lm?"#024744":"#00e5a0"):isUnmatched?"#f59e0b":(_lm?"#789e99":"#bfe3da"),fontSize:10,outline:"none",cursor:"pointer",width:"100%"}}>
+                              style={{background:assigned?(_lm?"#ddf2ea":"#002e24"):isUnmatched?(_lm?"#fffbeb":"#1a0e00"):(_lm?"#e8f4ef":"#0b2522"),border:`1px solid ${assigned?(_lm?"#00c896":"#00c89640"):isUnmatched?"#f59e0b40":(_lm?"#c4e0d8":"#182f2c")}`,borderRadius:5,padding:"3px 7px",color:assigned?(_lm?"#024744":"#00e5a0"):isUnmatched?"#f59e0b":(_lm?"#789e99":"#bfe3da"),fontSize:12,outline:"none",cursor:"pointer",width:"100%"}}>
                               <option value="">— leave unassigned —</option>
                               <option value="__ignore__" style={{color:"#ef4444"}}>🚫 Ignore this campaign</option>
                               {displayList.map(c=>(
@@ -19213,7 +19213,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
                       // actually confirmed — makes it unmistakable which line the data is about to land on.
                       const _pcol = (typeof PLT_COLORS!=="undefined" && PLT_COLORS[c.platform]) || (_lm?"#0369a1":"#7dd3fc");
                       return <div style={{fontSize:9,color:_lm?"#024744":"#00e5a0",paddingLeft:10,paddingBottom:4,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
-                        <span>🎯 <strong>{c.campaignName.trim()}</strong></span>
+                        <span style={{fontSize:12}}>🎯 <strong>{c.campaignName.trim()}</strong></span>
                         <span title={`Platform: ${c.platform}`} style={{background:_pcol+(_lm?"22":"26"),color:_pcol,border:`1px solid ${_pcol}66`,borderRadius:3,padding:"0 5px",fontWeight:800,letterSpacing:"0.02em",flexShrink:0}}>{c.platform}</span>
                         <span style={{color:_lm?"#789e99":"#bfe3da"}}>· {c.mediaPartner}</span>
                         {allArchivedIds.has(String(c.id))?<span style={{color:"#f59e0b"}}>· archived</span>:null}
