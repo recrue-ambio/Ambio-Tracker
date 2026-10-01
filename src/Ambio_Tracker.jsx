@@ -842,6 +842,47 @@ function normalizeTvsciUrl(u) {
 // override it in the sync settings (their saved URL wins over this default).
 const DEFAULT_TVSCI_SHEET_URL = "https://docs.google.com/spreadsheets/u/1/d/e/2PACX-1vRZVjK3l7MMjIYLG1ogh16so4d6SRyp2G4Og0WTorZMaHaPyy0eNq9PSiQmGdyNThKjmKUI9S-qr81Y/pubhtml?gid=0&single=true";
 
+// Minimal, quote-aware CSV → [{header:value}] parser (module-level so the background TVsci auto-apply can run
+// without the Quick Check-in panel mounted). Handles the published sheet's quoted money fields ("$17,407.54").
+function parseCsvRows(text){
+  const lines = String(text||"").split(/\r?\n/);
+  const splitLine = (line)=>{
+    const out=[]; let cur="", q=false;
+    for(let i=0;i<line.length;i++){ const ch=line[i];
+      if(q){ if(ch==='"'){ if(line[i+1]==='"'){ cur+='"'; i++; } else q=false; } else cur+=ch; }
+      else { if(ch==='"') q=true; else if(ch===','){ out.push(cur); cur=""; } else cur+=ch; } }
+    out.push(cur); return out;
+  };
+  if(!lines.length || !lines[0].trim()) return [];
+  const headers = splitLine(lines[0]).map(h=>h.trim());
+  const rows=[];
+  for(let i=1;i<lines.length;i++){ if(!lines[i].trim()) continue;
+    const cells = splitLine(lines[i]); const o={}; headers.forEach((h,j)=>o[h]=(cells[j]!=null?cells[j]:"").trim()); rows.push(o); }
+  return rows;
+}
+
+// Background TVsci auto-apply: from a fetched spend CSV + the check-in name-memory, build per-campaign summed
+// spend {life,daily,yest,today} for ONLY the lines whose campaign mapping is already saved (remembered). New /
+// unmapped lines are skipped — they still wait for manual review in the Quick Check-in. Spend-only fields, so
+// no P&L impact. Keyed exactly like makeNameKey("TVsci Spend", Campaign Name) so it matches saved mappings.
+function tvsciAutoApplyUpdates(csv, savedMappings){
+  const num = v => parseFloat(String(v==null?"":v).replace(/[$,\s]/g,""))||0;
+  const byCamp = {};
+  parseCsvRows(csv).forEach(row=>{
+    const name = (row["Campaign Name"]||"").trim();
+    if(!name) return;
+    const entry = savedMappings && savedMappings[`TVsci Spend||${name.toLowerCase()}`];
+    if(!entry || !entry.campId) return;
+    const id = String(entry.campId);
+    const b = byCamp[id] || (byCamp[id]={life:0,daily:0,yest:0,today:0});
+    b.life  += num(row["Lifetime Spend"]);
+    b.daily += num(row["Campaign Daily Budget"]);
+    b.yest  += num(row["Yesterday Spend"]);
+    b.today += num(row["Today Spend"]);
+  });
+  return byCamp;
+}
+
 // ── Ambio campaign-name matching ── The TVsci sheet and the tracker label the SAME tactic differently
 // (sheet "UMass Amherst - Video RT" ↔ tracker "UMass Amherst - RT (TVSci Video)"). Normalize each name to
 // a (client, tactic-token) pair so a sync can match on client + tactic even when the wording differs.
@@ -9694,6 +9735,10 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   const [pacingView,     setPacingView]     = useState("spend");
   // Which sub-view the 📊 Metrics tab shows (✈ Flights / 📅 This Month). "Mostly flights" → default Flights.
   const [metricsView,    setMetricsView]    = useState("lifetime");
+  // Global "last TVsci sync" timestamp (ISO) for the 💲 Spend view indicator — reactive: updates live when the
+  // background auto-sync fires, and on mount from the cached stamp.
+  const [tvsciLastSync, setTvsciLastSync] = useState(()=>{ try{ return localStorage.getItem("tvsci-last-sync")||""; }catch{ return ""; } });
+  useEffect(()=>{ const onAuto=e=>{ if(e?.detail?.at) setTvsciLastSync(e.detail.at); }; window.addEventListener("tvsci-autosync", onAuto); return ()=>window.removeEventListener("tvsci-autosync", onAuto); }, []);
   // ── Daily Digest view (the TVsci-emailed .xlsx QA report), a read-only Pacing sub-view ──
   const DIGEST_KEY = "ambio-daily-digest";
   const [digest,       setDigest]       = useState(()=>{ try{ const s=localStorage.getItem(DIGEST_KEY); return s?JSON.parse(s):null; }catch{ return null; } });
@@ -11527,7 +11572,11 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
                   : pct>=0.7 ? (lightMode?"#047857":"#00d48a")
                   : pct>=0.4 ? (lightMode?"#b45309":"#f59e0b")
                   : (lightMode?"#dc2626":"#ef4444");
-      const sync  = (String(c.lastSpendSync||c.tvsciSpendAsOf||"").match(/^\d{4}-\d{2}-\d{2}/)||[""])[0];
+      const syncRaw = String(c.lastSpendSync||c.tvsciSpendAsOf||"");
+      const sync  = (syncRaw.match(/^\d{4}-\d{2}-\d{2}/)||[""])[0];
+      // Exact clock time of the last sync, when lastSpendSync carries a full ISO timestamp (the sync/auto-apply
+      // stamps one; a legacy date-only tvsciSpendAsOf won't, so time is just omitted then).
+      const syncTime = (()=>{ const d=new Date(syncRaw); return (syncRaw.length>10 && !isNaN(d)) ? d.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"}) : ""; })();
       const Stat = ({label,val,color})=>(
         <div style={{display:"flex",flexDirection:"column",gap:1,minWidth:92}}>
           <span style={{fontSize:9,textTransform:"uppercase",letterSpacing:"0.05em",color:lightMode?"#789e99":"#8fb3ad",fontWeight:700}}>{label}</span>
@@ -11537,7 +11586,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       return (
         <div style={{background:lightMode?"#e8f4ef":"#04100f",borderBottom:"1px solid "+lmBrdR,borderLeft:"3px solid "+col,padding:"10px 16px 11px 42px"}}>
           <div style={{fontSize:9,color:lightMode?"#789e99":"#bfe3da",textTransform:"uppercase",letterSpacing:"0.06em",fontWeight:700,marginBottom:7}}>
-            📺 Ambio Spend Report{sync?` · synced ${fmtDate(sync)}`:" · not synced yet"}
+            📺 Ambio Spend Report{sync?` · synced ${fmtDate(sync)}${syncTime?` at ${syncTime}`:""}`:" · not synced yet"}
           </div>
           <div style={{display:"flex",flexWrap:"wrap",gap:24,alignItems:"flex-end"}}>
             <Stat label="Lifetime spend" val={money(life)}/>
@@ -12554,6 +12603,19 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
           ))}
         </div>
       )}
+      {/* 💲 Spend view — exact last-sync time, at a glance (reactive to the 3-hr background auto-sync). */}
+      {pacingView==="spend" && (()=>{
+        const d = tvsciLastSync ? new Date(tvsciLastSync) : null;
+        const txt = (d && !isNaN(d))
+          ? `${d.toLocaleDateString("en-US",{month:"short",day:"numeric"})}, ${d.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"})}`
+          : "not synced yet";
+        return (
+          <span title={d&&!isNaN(d) ? `Ambio Spend Report last synced ${d.toLocaleString()} · auto-syncs every ~3 hours; remembered campaigns apply automatically` : "Hasn't synced yet — auto-syncs every ~3 hours, or hit Quick Check-in → Sync"}
+            style={{display:"inline-flex",alignItems:"center",gap:5,fontSize:11,fontWeight:600,color:lmTxtS,background:lmBgInp,border:"1px solid "+lmBrd,borderRadius:7,padding:"5px 11px",whiteSpace:"nowrap"}}>
+            🔄 Synced {txt}
+          </span>
+        );
+      })()}
     </div>
     {/* Check-in drop box opens here, right under the toggle row, when active. */}
     {quickCheckInPanel && <div style={{marginBottom:14}}>{quickCheckInPanel}</div>}
@@ -24581,6 +24643,36 @@ export default function App() {
     if (stale) doSync();
     const id = setInterval(doSync, INTERVAL);
     return () => clearInterval(id);
+  }, []);
+  // ── TVsci background AUTO-APPLY ── When a sync lands (background timer or a fresh fetch), write the new
+  // spend straight onto any campaign whose line→campaign mapping is already saved in the check-in memory —
+  // no manual review needed for those. New/unmapped lines are left alone (they still stage for review in the
+  // Quick Check-in). Spend-only fields (tvsci*), so the monthly P&L / FEE overage are never touched. Guarded
+  // by a "last auto-applied" stamp so the same sync isn't re-applied on every load.
+  useEffect(() => {
+    const apply = (csv, at) => {
+      if (!csv) return;
+      const syncAt = at || (()=>{ try{ return localStorage.getItem("tvsci-last-sync")||""; }catch{ return ""; } })();
+      let doneAt=""; try{ doneAt = localStorage.getItem("tvsci-last-autoapplied")||""; }catch{}
+      if (syncAt && syncAt===doneAt) return;                 // this sync already auto-applied
+      let savedMappings={}; try{ savedMappings = JSON.parse(localStorage.getItem(CSV_MAPPINGS_KEY)||"{}"); }catch{}
+      const updates = tvsciAutoApplyUpdates(csv, savedMappings);
+      const markDone = ()=>{ try{ if(syncAt) localStorage.setItem("tvsci-last-autoapplied", syncAt); }catch{} };
+      if (!Object.keys(updates).length) { markDone(); return; }   // nothing remembered matched — don't retry each load
+      const asOfDate = (syncAt.match(/^\d{4}-\d{2}-\d{2}/)||[""])[0] || getToday();
+      const stamp = (c)=>{ const u=updates[String(c.id)]; if(!u) return c; return {...c,
+        tvsciLifetimeSpend:u.life.toFixed(2), tvsciDailyBudget:u.daily.toFixed(2),
+        tvsciYesterdaySpend:u.yest.toFixed(2), tvsciTodaySpend:u.today.toFixed(2),
+        tvsciSpendAsOf:asOfDate, lastSpendSync:(syncAt||new Date().toISOString()) }; };
+      setCampaigns(cs=>cs.map(stamp));
+      if (typeof setArchive==="function") setArchive(as=>as.map(stamp));
+      markDone();
+    };
+    const onAuto = e => { if (e?.detail?.csv) apply(e.detail.csv, e.detail.at); };
+    window.addEventListener("tvsci-autosync", onAuto);
+    // Apply the latest cached sync on mount (the background timer may have fetched before this mounted).
+    try { apply(localStorage.getItem("tvsci-cached-csv")||"", localStorage.getItem("tvsci-last-sync")||""); } catch {}
+    return () => window.removeEventListener("tvsci-autosync", onAuto);
   }, []);
   // ONE month-end P&L projection for the WHOLE app — the Revenue-tab chart AND the Home "on pace for" tile
   // both read THIS same value, so their projected-profit numbers can't disagree (the user hit repeated
