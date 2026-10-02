@@ -5314,6 +5314,16 @@ function Modal({ campaign, onSave, onClose, isNew, partners=[], reminders=[], se
                 <label style={{display:"block",fontSize:10,color:_lm?"#527a75":"#d1ece5",marginBottom:3,textTransform:"uppercase",letterSpacing:"0.06em"}}>🧾 IO #</label>
                 <input type="text" value={f["ioNumber"]||""} onChange={e=>set("ioNumber",e.target.value)} placeholder="e.g. 16617480" style={iS}/>
               </div>
+              {/* Pacing group — lines sharing a group pace their COMBINED spend vs COMBINED budget in the 💲 Spend
+                  view (one goal row, each line still shown beneath it). For the PTV pool split across CTV/OTT
+                  Outreach + Display RT + Video RT. Leave blank for a standalone line (e.g. Premium RT). */}
+              <div style={{marginBottom:12}}>
+                <label style={{display:"block",fontSize:10,color:"#00d9ff",marginBottom:3,textTransform:"uppercase",letterSpacing:"0.06em"}}>📦 Pacing Group <span style={{color:_lm?"#97bab6":"#8fbfb6",fontWeight:400,textTransform:"none",letterSpacing:0}}>(optional)</span></label>
+                <input list="pacing-group-suggestions" value={f.pacingGroup||""} onChange={e=>set("pacingGroup",e.target.value)} placeholder="e.g. UMich – PTV" style={iS} title="Lines with the SAME group roll up to one combined goal (combined spend vs combined budget) in the 💲 Spend view, with each line still shown underneath. Leave blank for a standalone line."/>
+                <datalist id="pacing-group-suggestions">
+                  {[...new Set((campaigns||[]).map(c=>c.pacingGroup).filter(Boolean))].map(g=><option key={g} value={g}/>)}
+                </datalist>
+              </div>
               {/* In a schedule mode (month/dates) the builder spans ALL 3 field columns — otherwise it's
                   trapped in one narrow column, which stacks the inputs vertically and leaves the other two
                   columns empty (the "huge space on the left"). Full width lets each flight window sit on one
@@ -9791,6 +9801,9 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   // Collapse state for the Lifetime status sections (Behind / On Track / Goal Hit).
   const [lifeCollapsed, setLifeCollapsed] = useState(()=>new Set());
   const toggleLifeSection = k => setLifeCollapsed(s=>{ const n=new Set(s); n.has(k)?n.delete(k):n.add(k); return n; });
+  // Collapse state for 💲 Spend "pacing groups" (lines sharing a pacingGroup that roll up to one combined goal).
+  const [groupCollapsed, setGroupCollapsed] = useState(()=>new Set());
+  const toggleGroup = k => setGroupCollapsed(s=>{ const n=new Set(s); n.has(k)?n.delete(k):n.add(k); return n; });
   // Which campaign rows have their per-line breakdown expanded — held HERE (keyed by campaign id),
   // not inside TableRow. TableRow is redefined on every PacingDashboard render, so React remounts every
   // row whenever any campaign changes (e.g. pausing one). Row-local expand state would reset on that
@@ -12279,6 +12292,109 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
             else if(mk!=="spend") disp.impressions = String(r.delivered);
             return { c, disp, pacing: fp, monthlyGoal: r.goalNum, flightChart: true, spendOnly };  // expanded chart spans the whole flight
           };
+          // ── Pacing GROUPS (💲 Spend view only) ──────────────────────────────────────────────────────────
+          // Lines sharing a `pacingGroup` pool into ONE goal row: COMBINED synced spend vs the COMBINED budget
+          // (sum of the members), paced across the members' flight span. Each member still shows under the group
+          // header with its own spend (per-line visibility stays), but the GROUP carries the goal — so budget
+          // can shift between lines without moving the target. (Austin/Adam: the PTV pool split across CTV/OTT
+          // Outreach + Display RT + Video RT rolls up to one goal; Premium RT stays a standalone row.)
+          const anyGroup = spendOnly && rows.some(r => (r.c.pacingGroup||"").trim());
+          if (anyGroup) {
+            const gmap = {}, units = [];
+            rows.forEach(r => {
+              const g = (r.c.pacingGroup||"").trim();
+              if (g) { if(!gmap[g]){ gmap[g]={type:"group",key:g,members:[]}; units.push(gmap[g]); } gmap[g].members.push(r); }
+              else units.push({ type:"single", key:String(r.c.id), row:r });
+            });
+            units.forEach(u => {
+              if (u.type!=="group") { const r=u.row; u.lp=r.lp; u.delivered=r.delivered; u.goalNum=r.goalNum; u.isOff=r.isOff; return; }
+              const m=u.members;
+              const delivered=m.reduce((s,x)=>s+(x.delivered||0),0);
+              const goalNum=m.reduce((s,x)=>s+(x.goalNum||0),0);
+              const starts=m.map(x=>x.c.startDate).filter(Boolean).sort();
+              const ends=m.map(x=>x.c.endDate).filter(Boolean).sort();
+              const synth={platform:m[0].c.platform,dealType:m[0].c.dealType,startDate:starts[0]||"",endDate:ends.length?ends[ends.length-1]:""};
+              u.lp=computeLifetimePacing(synth,delivered,goalNum)||{pct:goalNum>0?delivered/goalNum:0,color:"#bfe3da",label:"",expected:0,timeFrac:null,delivered,goal:goalNum,unit:"$",metricKind:"spend",hasDates:!!(starts[0]&&ends.length),daysLeft:null,ended:false};
+              u.delivered=delivered; u.goalNum=goalNum; u.isOff=m.every(x=>x.isOff);
+            });
+            const uBucket = u => u.isOff ? "off" : ((u.lp.pct<1 && /Behind|Missed|short/i.test(u.lp.label||"")) ? "behind" : ((u.lp.pct>=1 || /Ahead|Goal hit|at goal/i.test(u.lp.label||"")) ? "ahead" : "ontrack"));
+            const uBuckets = [
+              {key:"behind",label:"Behind",color:"#fde047",units:units.filter(u=>uBucket(u)==="behind")},
+              {key:"ontrack",label:"On Track",color:"#00d48a",units:units.filter(u=>uBucket(u)==="ontrack")},
+              {key:"ahead",label:"Ahead",color:"#f97316",units:units.filter(u=>uBucket(u)==="ahead")},
+              {key:"off",label:"Off",color:"#f87171",tint:true,units:units.filter(u=>uBucket(u)==="off")},
+            ];
+            const $m = n => (n<0?"-":"")+"$"+(Math.abs(n)>=1000?(Math.abs(n)/1000).toFixed(1)+"k":Math.round(Math.abs(n)));
+            const GACC = "#00d9ff";
+            const renderGroupHeader = (u) => {
+              const lp=u.lp, col=lmC(lp.color), open=!groupCollapsed.has(u.key);
+              const expPct=lp.timeFrac!=null?Math.min(100,lp.timeFrac*100):null;
+              const dailyBudSum=u.members.reduce((s,x)=>s+(parseFloat(x.c.tvsciDailyBudget)||0),0);
+              const yestSum=u.members.reduce((s,x)=>s+(parseFloat(x.c.tvsciYesterdaySpend)||0),0);
+              const remaining=Math.max(0,(u.goalNum||0)-(u.delivered||0));
+              const dLeft=(lp.daysLeft!=null&&lp.daysLeft>0)?lp.daysLeft:null;
+              const npd=(dLeft&&u.goalNum>0)?Math.round(remaining/Math.max(1,dLeft-1)):null;
+              const capped=dailyBudSum>0&&npd!=null&&npd>dailyBudSum*1.15;
+              const gap=(u.goalNum>0&&lp.expected!=null)?(u.delivered-lp.expected):null;
+              const gapCol=gap==null?lmTxtS:(gap>=0?lmC("#00d48a"):lmC("#f59e0b"));
+              const yPct=dailyBudSum>0?(yestSum/dailyBudSum)*100:null;
+              const yCol=yPct==null?lmTxtS:yPct>=70?lmC("#00d48a"):yPct>=40?lmC("#f59e0b"):lmC("#ef4444");
+              const hb=lightMode?"#eaf6ff":"#071a20";
+              return (
+                <div style={{display:"grid",gridTemplateColumns:GRID_SPEND,gap:8,padding:"9px 16px",borderBottom:"1px solid "+lmBrdR,alignItems:"center",background:hb,borderLeft:"3px solid "+GACC}}>
+                  <div style={{minWidth:0,position:"sticky",left:0,zIndex:2,background:hb,boxShadow:`6px 0 8px -6px rgba(0,0,0,${lightMode?0.16:0.55})`,display:"flex",alignItems:"center",gap:6}}>
+                    <button onClick={()=>toggleGroup(u.key)} style={{background:"none",border:"none",padding:0,cursor:"pointer",color:GACC,fontSize:11,fontWeight:700,flexShrink:0,transform:open?"rotate(90deg)":"none",transition:"transform .15s"}}>▸</button>
+                    <span style={{fontSize:13,fontWeight:800,color:lmTxt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}} title={u.key}>📦 {u.key}</span>
+                    <span style={{flexShrink:0,fontSize:9,fontWeight:700,color:GACC,background:GACC+(lightMode?"18":"26"),border:`1px solid ${GACC}55`,borderRadius:3,padding:"0 5px"}}>{u.members.length} lines</span>
+                  </div>
+                  <div><span style={{fontSize:9,fontWeight:800,color:GACC,letterSpacing:"0.04em"}}>GROUP</span></div>
+                  <div>
+                    <div style={{position:"relative",background:lmBarTrk,borderRadius:4,height:10,overflow:"visible",marginBottom:2}}>
+                      <div style={{background:col,height:"100%",width:Math.min(100,lp.pct*100)+"%",borderRadius:4}}/>
+                      {expPct!=null&&!lp.ended&&<div style={{position:"absolute",top:-4,left:Math.min(97,expPct)+"%",width:3,height:18,background:"#38bdf8",borderRadius:1,zIndex:3}}/>}
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:5}}>
+                      <span style={{fontSize:11,color:col,fontWeight:700}}>{(lp.pct*100).toFixed(1)}%</span>
+                      {expPct!=null&&!lp.ended&&<span style={{fontSize:10,color:"#38bdf8aa"}}>/{Math.round(expPct)}%</span>}
+                    </div>
+                  </div>
+                  <div><span style={{fontSize:11,fontWeight:700,color:"#00e5a0"}}>{$m(u.goalNum)}</span></div>
+                  <div style={{fontSize:11}}><span style={{fontWeight:800,color:lmC("#7dd3fc")}}>{$m(u.delivered)}</span> <span style={{color:lmTxtD}}>/ {$m(lp.expected||0)}</span></div>
+                  <div><span style={{fontSize:11,fontWeight:700,color:gapCol}}>{gap==null?"—":(gap>=0?"+":"")+$m(gap)}</span></div>
+                  <div><span style={{fontSize:11,fontWeight:capped?800:700,color:capped?lmC("#ef4444"):lmTxtS}} title={capped?`Capped — group needs ${$m(npd)}/day but the combined daily budget is only ${$m(dailyBudSum)}`:""}>{npd==null?"—":$m(npd)}</span></div>
+                  <div><span style={{fontSize:11,fontWeight:700,color:yCol}}>{yestSum>0?$m(yestSum):"—"}{yPct!=null&&yestSum>0?` ${Math.round(yPct)}%`:""}</span></div>
+                  <div><span style={{fontSize:11,fontWeight:capped?800:700,color:capped?lmC("#ef4444"):lmC("#7dd3fc")}}>{dailyBudSum>0?$m(dailyBudSum):"—"}</span></div>
+                  <div style={{display:"flex",justifyContent:"flex-end"}}><button onClick={()=>toggleGroup(u.key)} style={{background:"none",border:"none",cursor:"pointer",color:lmTxtD,fontSize:10,transform:open?"rotate(90deg)":"none"}}>▶</button></div>
+                </div>
+              );
+            };
+            return (
+              <div className="pacing-hscroll">
+              <div style={{minWidth:1240}}>
+              <div style={{border:"1px solid "+lmBrd,borderRadius:9,overflow:"visible",background:lmBg}}>
+                <TableHeader spendOnly={true}/>
+                {!uBuckets.some(b=>b.units.length>0) && <div style={{padding:"16px",textAlign:"center",fontSize:11,color:lmTxtS}}>Nothing at risk right now — toggle off “At risk only” to see all.</div>}
+                {uBuckets.map(b => b.units.length===0?null:(
+                  <div key={b.key}>
+                    <div onClick={()=>toggleLifeSection(b.key)} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 16px",cursor:"pointer",userSelect:"none",borderBottom:"1px solid "+lmBrdR,background:b.tint?lmC(b.color)+"22":lmBgInp,...(b.tint?{boxShadow:`inset 3px 0 0 ${lmC(b.color)}`}:{})}}>
+                      <span style={{fontSize:11,fontWeight:800,textTransform:"uppercase",letterSpacing:"0.07em",color:lmC(b.color)}}>{b.label}</span>
+                      <span style={{fontSize:11,color:lmTxtD,fontWeight:700}}>({b.units.length})</span>
+                      <span style={{marginLeft:"auto",color:lmTxtD,fontSize:10,display:"inline-block",transform:lifeCollapsed.has(b.key)?"none":"rotate(90deg)",transition:"transform .15s"}}>▶</span>
+                    </div>
+                    {!lifeCollapsed.has(b.key) && b.units.map(u => u.type==="single"
+                      ? <TableRow key={u.row.c.id} {...flightRowProps(u.row)}/>
+                      : (<React.Fragment key={"grp:"+u.key}>
+                          {renderGroupHeader(u)}
+                          {!groupCollapsed.has(u.key) && u.members.map(m => <TableRow key={m.c.id} {...flightRowProps(m)}/>)}
+                        </React.Fragment>)
+                    )}
+                  </div>
+                ))}
+              </div>
+              </div>
+              </div>
+            );
+          }
           return (
             <div className="pacing-hscroll">
             <div style={{minWidth:spendOnly?1240:1720}}>
