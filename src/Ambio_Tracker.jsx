@@ -12222,12 +12222,18 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       if(sortKey==="platform") return _dir * String(a.c.platform).localeCompare(String(b.c.platform));
       if(sortKey==="partner")  return _dir * String(a.c.mediaPartner||"").localeCompare(String(b.c.mediaPartner||""));
       if(sortKey==="ends"){ const ea=a.c.endDate||"9999-99", eb=b.c.endDate||"9999-99"; return _dir * (ea<eb?-1:ea>eb?1:0); }
+      // Group by BAR COLOR first so same-colour rows stay together: red "Missed" (ended, way short) sinks to
+      // the BOTTOM of its section instead of sitting between active yellow rows — those reds are finished and
+      // un-actionable, so they belong below the yellows you can still push. Orange/green (ahead/on-track)=0,
+      // yellow (behind/short)=1, red (missed)=2. Metric/pace sorts only (name/platform/partner/ends returned
+      // above); NOT multiplied by _dir so colour grouping holds in both asc and desc.
+      const sev = r => r.lp.color==="#ef4444" ? 2 : r.lp.color==="#fde047" ? 1 : 0;
+      const sa = sev(a), sb = sev(b);
+      if(sa!==sb) return sa-sb;
       const va=numOf(a,sortKey), vb=numOf(b,sortKey);
       if(va!=null && vb!=null) return _dir * (va - vb);
       return _dir * ((a.lp.pct||0)-(b.lp.pct||0)); // fallback → pace %
     });
-    const GL = "minmax(280px,1.4fr) 72px 240px 80px 100px 150px";
-    const cell = { fontSize: 11, color: lmTxt, display: "flex", alignItems: "center" };
     return (
       <div>
         {/* Flights summary strip */}
@@ -12250,71 +12256,6 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
             No contracts to show yet. Flight pacing covers campaigns that <b>started June 1, 2026 or later</b> and have a total <b>Budget</b> — add a budget like <code>$10.2K</code> or <code>$45K</code> plus Start &amp; End dates in Add/Edit campaign.
           </div>
         ) : (()=>{
-          // Row renderer shared by every status section below.
-          const lifeRow = ({c,delivered,prior,live,lp,isOff}) => {
-            const col = lp.color;
-            const expPct = lp.timeFrac != null ? Math.min(100, lp.timeFrac*100) : null;
-            return (
-                <div key={c.id} style={{display:"grid",gridTemplateColumns:GL,gap:8,padding:"9px 14px",borderBottom:"1px solid "+lmBrdR,alignItems:"center",borderLeft:"3px solid "+lmC(col)}}>
-                  {/* Campaign name — partner removed to match the monthly pacing view (the user: no partner
-                      on the Pacing tab). Name opens the edit modal (to set the contract Goal). */}
-                  <div style={{minWidth:0}}>
-                    <div onClick={()=>onEdit(c)} title="Edit campaign (set the contract Goal)" style={{fontSize:14,fontWeight:700,color:lmTxt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:"pointer"}}>
-                      {isOff && <span title="Paused / off — shown so you can confirm a finished contract" style={{fontSize:9,fontWeight:700,color:lmTxtD,border:"1px solid "+lmBrd,borderRadius:3,padding:"0 4px",marginRight:5}}>OFF</span>}
-                      {c.campaignName.trim()}
-                    </div>
-                    <div style={{display:"flex",alignItems:"center",gap:5,overflow:"hidden"}}>
-                      {dataUpdatedToday(c)
-                        ? <span style={{fontSize:9,color:"#00d48a",fontWeight:700,background:lightMode?"#dcfce7":"#00200f",border:"1px solid #00d48a40",borderRadius:3,padding:"0px 4px",flexShrink:0}}>✓ today</span>
-                        : <span style={{fontSize:9,color:lmTxtS,fontWeight:400,flexShrink:0}}>{(()=>{ const d=lastDataDate(c); return d&&/^\d{4}-\d{2}-\d{2}$/.test(d)?(([y,m,dd])=>`${m}/${dd}/${y}`)(d.split("-")):"—"; })()}</span>}
-                    </div>
-                  </div>
-                  {/* Platform */}
-                  <div><span style={{...vBadge(PLT_COLORS[c.platform]||PLT_COLORS.default),borderRadius:3,padding:"1px 5px",fontSize:10,fontWeight:700}}>{c.platform}</span></div>
-                  {/* Status column removed to match the monthly view. The plain Behind/On Track/Ahead
-                      label just repeated the section header + left border, so it's folded into the bar
-                      cell below — and only shown when it carries EXTRA info (a goal-hit / ended state). */}
-                  {/* Lifetime pacing bar — same style as the monthly bar (electric-blue expected tick) */}
-                  <div>
-                    <div style={{position:"relative",background:lmBarTrk,borderRadius:4,height:10,overflow:"visible",marginBottom:2}}>
-                      <div style={{background:lmC(col),height:"100%",width:Math.min(100,lp.pct*100)+"%",borderRadius:4}}/>
-                      {expPct!=null && !lp.ended && <div title={"Expected by now: "+Math.round(lp.expected||0).toLocaleString()+" ("+Math.round(expPct)+"%)"}
-                        style={{position:"absolute",top:-4,left:Math.min(97,expPct)+"%",width:3,height:18,background:"#38bdf8",borderRadius:1,zIndex:3,boxShadow:"0 0 6px #38bdf8, 0 0 12px #38bdf888"}}/>}
-                    </div>
-                    <div style={{display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
-                      <span style={{fontSize:11,color:lmC(col),fontWeight:700}}>{(lp.pct*100).toFixed(1)}%</span>
-                      {expPct!=null && !lp.ended && <span style={{fontSize:10,color:"#38bdf8aa"}}>/{Math.round(expPct)}%</span>}
-                      {lp.label && !["Behind","On Track","Ahead"].includes(lp.label) && (
-                        <span title={`Lifetime status: ${lp.label}`} style={{fontSize:9,fontWeight:700,...vBadge(col),borderRadius:3,padding:"0px 5px",whiteSpace:"nowrap"}}>{lp.label}</span>
-                      )}
-                    </div>
-                  </div>
-                  {/* Goal — electric green, matches monthly */}
-                  <div>
-                    <span style={{fontSize:11,fontWeight:700,color:"#00e5a0"}} title={"Contract goal: "+lp.goal.toLocaleString()}>{fmtN(lp.goal,lp.metricKind)}</span>
-                  </div>
-                  {/* Impr / Views served (cumulative across the flight) — electric blue, matches monthly */}
-                  <div title="Total delivered across the flight (closed months + this month)">
-                    <div style={{display:"flex",alignItems:"baseline",gap:3}}>
-                      <span style={{fontSize:12,fontWeight:800,color:lmC("#7dd3fc"),letterSpacing:"-0.01em"}}>{fmtN(delivered,lp.metricKind)}</span>
-                      <span style={{fontSize:9,color:lmTxtD}}>{lp.unit}</span>
-                    </div>
-                    {prior>0 && <div title="Closed-month backups + this month so far" style={{fontSize:9,color:lmTxtD,whiteSpace:"nowrap"}}>{fmtN(prior,lp.metricKind)}+{fmtN(live,lp.metricKind)}</div>}
-                  </div>
-                  {/* Flight — to the RIGHT of impressions/views */}
-                  <div style={{...cell,flexDirection:"column",alignItems:"flex-start",gap:1}}>
-                    {lp.hasDates ? (
-                      <React.Fragment>
-                        <span style={{fontSize:10,color:lmTxtM,whiteSpace:"nowrap"}}>{fmtDate(c.startDate)} → {fmtDate(c.endDate)}</span>
-                        <span style={{fontSize:9,fontWeight:700,color: lp.ended ? lmTxtD : (lp.daysLeft!=null && lp.daysLeft<=14 ? lmC("#fde047") : lmTxtS)}}>
-                          {lp.ended ? "ended" : (lp.daysLeft===0 ? "ends today" : lp.daysLeft+"d left")}
-                        </span>
-                      </React.Fragment>
-                    ) : <span style={{fontSize:10,color:lmTxtD,fontStyle:"italic"}}>no flight dates</span>}
-                  </div>
-                </div>
-              );
-          };
           // Group the sorted rows into the monthly-style status sections: Behind / On Track / Ahead.
           const buckets = [
             { key:"behind",  label:"Behind",   color:"#fde047", rows: rows.filter(r=>lifeBucket(r)==="behind") },
@@ -25929,9 +25870,26 @@ export default function App() {
           // correct. Falls back to the live field whenever the resolver has nothing.
           const rm = resolveMetrics(c, "mtd");
           const pick = (r, live) => (r != null && r !== "" ? r : (live || ""));
+          // TVsci synced spend lives in tvsciLifetimeSpend (lifetime cumulative), which resolveMetrics can't
+          // see — so for a spend-paced synced flight, back up THIS month's PORTION (lifetime − the spend
+          // already backed up in prior closed months) instead of a blind $0. Without this, closing a month
+          // records $0 synced spend and next month's fee math (feeCurrentMonthSpend = lifetime − prior closed
+          // months) gets charged the WHOLE flight's spend — the lifetime-spend proration breaks. Mirrors
+          // feeCurrentMonthSpend exactly so the closed-month portion and the live current-month portion agree.
+          let spendVal = pick(rm.spend, c.spend);
+          const _tvLife = parseFloat(c.tvsciLifetimeSpend) || 0;
+          if (_tvLife > 0 && pacingMetricFor(c.platform, c.dealType) === "spend") {
+            let priorSum = 0, mm = c.startDate ? c.startDate.slice(0,7) : prevMonth;
+            while (mm < prevMonth) {
+              const pb = (backups[mm] && backups[mm].campaigns || []).find(x=>String(x.id)===String(c.id));
+              const ps = pb ? (parseFloat(pb.spend)||0) : 0; if (ps > 0) priorSum += ps;
+              const [yy,m2] = mm.split("-").map(Number); const d = new Date(yy, m2, 1); mm = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+            }
+            spendVal = Math.max(0, _tvLife - priorSum).toFixed(2);
+          }
           return { id:c.id, campaignName:c.campaignName, platform:c.platform, mediaPartner:c.mediaPartner,
             impressions:pick(rm.impressions,c.impressions), clicks:pick(rm.clicks,c.clicks), ctr:pick(rm.ctr,c.ctr),
-            cpm:pick(rm.cpm,c.cpm), spend:pick(rm.spend,c.spend),
+            cpm:pick(rm.cpm,c.cpm), spend:spendVal,
             videoViews:pick(rm.videoViews,c.videoViews), completionRate:pick(rm.completionRate,c.completionRate),
             frequency:c.frequency, note1:c.note1,
             // Freeze the device-targeting surcharge NOW, while the live line-breakdown still exists —
