@@ -11285,18 +11285,18 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     const _hasSpendReport = (parseFloat(c.tvsciLifetimeSpend)||0) > 0 || (parseFloat(c.tvsciDailyBudget)||0) > 0 || (c.tvsciYesterdaySpend!=null && String(c.tvsciYesterdaySpend)!=="");
     const canExpand = spendOnly ? _hasSpendReport : (!!rowBreakdown || hasWeekly || hasCreatives || primaryRaw > 0);
 
-    // Group members (lines rolling up to a pacing-group header) get a cyan rail + a faint tint + a ↳ indent
-    // so they visually hang under their group header instead of reading as standalone rows.
-    const _rowBg = groupMember ? (lightMode?"#eef9ff":"#05171c") : lmBg;
+    // Group members (lines rolling up to a pacing-group header) are indented + smaller + faintly tinted so they
+    // read as sub-lines under their header — but keep their OWN pacing colour (green/yellow/red), not a group tint.
+    const _rowBg = groupMember ? (lightMode?"#eef6f2":"#081c18") : lmBg;
     return <React.Fragment>
-    <div style={{display:"grid",gridTemplateColumns:spendOnly?GRID_SPEND:GRID,gap:8,padding:"9px 16px",borderBottom:canExpand&&rowBreakdownOpen?"none":"1px solid "+lmBrdR,alignItems:"center",background:_rowBg,borderLeft:"3px solid "+(groupMember?"#00d9ff":col)}}>
+    <div style={{display:"grid",gridTemplateColumns:spendOnly?GRID_SPEND:GRID,gap:8,padding:groupMember?"6px 16px":"9px 16px",borderBottom:canExpand&&rowBreakdownOpen?"none":"1px solid "+lmBrdR,alignItems:"center",background:_rowBg,borderLeft:"3px solid "+col}}>
 
       {/* Campaign name + freshness/flight sub-line. Partner name removed per the user (2026-07-17) —
           it's still searchable and shown in the edit modal, just not cluttering every pacing row.
           STICKY: pinned to the left so the campaign name stays visible when you scroll the table right. */}
-      <div style={{minWidth:0,position:"sticky",left:0,zIndex:2,background:_rowBg,boxShadow:`6px 0 8px -6px rgba(0,0,0,${lightMode?0.16:0.55})`}}>
-        <div style={{fontSize:groupMember?13:14,fontWeight:groupMember?600:700,color:lmTxt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",display:"flex",alignItems:"center",gap:6,marginLeft:groupMember?14:0}}>
-          {groupMember&&<span style={{color:"#00d9ff",fontSize:12,flexShrink:0,fontWeight:400}}>↳</span>}
+      <div style={{minWidth:0,position:"sticky",left:0,zIndex:2,background:_rowBg,boxShadow:`6px 0 8px -6px rgba(0,0,0,${lightMode?0.16:0.55})`,paddingLeft:groupMember?24:0}}>
+        <div style={{fontSize:groupMember?12:14,fontWeight:groupMember?500:700,color:lmTxt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",display:"flex",alignItems:"center",gap:6}}>
+          {groupMember&&<span style={{color:lmTxtD,fontSize:11,flexShrink:0,fontWeight:400}}>↳</span>}
           {canExpand&&(
             <button onClick={()=>setRowBreakdownOpen(v=>!v)}
               title={spendOnly
@@ -12348,7 +12348,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
                 <div style={{display:"grid",gridTemplateColumns:GRID_SPEND,gap:8,padding:"11px 16px",borderTop:"2px solid "+GACC+"66",borderBottom:"1px solid "+lmBrdR,alignItems:"center",background:hb,borderLeft:"5px solid "+GACC}}>
                   <div style={{minWidth:0,position:"sticky",left:0,zIndex:2,background:hb,boxShadow:`6px 0 8px -6px rgba(0,0,0,${lightMode?0.16:0.55})`,display:"flex",alignItems:"center",gap:6}}>
                     <button onClick={()=>toggleGroup(u.key)} style={{background:"none",border:"none",padding:0,cursor:"pointer",color:GACC,fontSize:12,fontWeight:700,flexShrink:0,transform:open?"rotate(90deg)":"none",transition:"transform .15s"}}>▸</button>
-                    <span style={{fontSize:14,fontWeight:800,color:lightMode?"#0b3a46":"#d6f6ff",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}} title={u.key}>📦 {u.key}</span>
+                    <span style={{fontSize:15,fontWeight:800,color:lightMode?"#0b3a46":"#d6f6ff",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}} title={u.key}>📦 {u.key}</span>
                     <span style={{flexShrink:0,fontSize:9,fontWeight:700,color:GACC,background:GACC+(lightMode?"18":"26"),border:`1px solid ${GACC}55`,borderRadius:3,padding:"0 5px"}}>{u.members.length} lines</span>
                   </div>
                   <div><span style={{fontSize:9,fontWeight:800,color:GACC,letterSpacing:"0.04em"}}>GROUP</span></div>
@@ -12368,7 +12368,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
                   <div><span style={{fontSize:11,fontWeight:capped?800:700,color:capped?lmC("#ef4444"):lmTxtS}} title={capped?`Capped — group needs ${$m(npd)}/day but the combined daily budget is only ${$m(dailyBudSum)}`:""}>{npd==null?"—":$m(npd)}</span></div>
                   <div><span style={{fontSize:11,fontWeight:700,color:yCol}}>{yestSum>0?$m(yestSum):"—"}{yPct!=null&&yestSum>0?` ${Math.round(yPct)}%`:""}</span></div>
                   <div><span style={{fontSize:11,fontWeight:capped?800:700,color:capped?lmC("#ef4444"):lmC("#7dd3fc")}}>{dailyBudSum>0?$m(dailyBudSum):"—"}</span></div>
-                  <div style={{display:"flex",justifyContent:"flex-end"}}><button onClick={()=>toggleGroup(u.key)} style={{background:"none",border:"none",cursor:"pointer",color:lmTxtD,fontSize:10,transform:open?"rotate(90deg)":"none"}}>▶</button></div>
+                  <div/>
                 </div>
               );
             };
