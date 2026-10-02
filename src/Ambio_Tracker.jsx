@@ -12302,7 +12302,9 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
           // header with its own spend (per-line visibility stays), but the GROUP carries the goal — so budget
           // can shift between lines without moving the target. (Austin/Adam: the PTV pool split across CTV/OTT
           // Outreach + Display RT + Video RT rolls up to one goal; Premium RT stays a standalone row.)
-          const anyGroup = spendOnly && rows.some(r => (r.c.pacingGroup||"").trim());
+          // Grouping applies in BOTH the 💲 Spend view and the 📊 Metrics → ✈ Flights view (both go through
+          // renderLifetime). The group header adapts its columns to the view's grid (spend vs full metrics).
+          const anyGroup = rows.some(r => (r.c.pacingGroup||"").trim());
           if (anyGroup) {
             const gmap = {}, units = [];
             rows.forEach(r => {
@@ -12347,7 +12349,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
               const yCol=yPct==null?lmTxtS:yPct>=70?lmC("#00d48a"):yPct>=40?lmC("#f59e0b"):lmC("#ef4444");
               const hb=lightMode?"#eaf6ff":"#071a20";
               return (
-                <div style={{display:"grid",gridTemplateColumns:GRID_SPEND,gap:8,padding:"11px 16px",borderTop:"2px solid "+GACC+"66",borderBottom:"1px solid "+lmBrdR,alignItems:"center",background:hb,borderLeft:"5px solid "+GACC}}>
+                <div style={{display:"grid",gridTemplateColumns:spendOnly?GRID_SPEND:GRID,gap:8,padding:"11px 16px",borderTop:"2px solid "+GACC+"66",borderBottom:"1px solid "+lmBrdR,alignItems:"center",background:hb,borderLeft:"5px solid "+GACC}}>
                   <div style={{minWidth:0,position:"sticky",left:0,zIndex:2,background:hb,boxShadow:`6px 0 8px -6px rgba(0,0,0,${lightMode?0.16:0.55})`,display:"flex",alignItems:"center",gap:6}}>
                     <button onClick={()=>toggleGroup(u.key)} style={{background:"none",border:"none",padding:0,cursor:"pointer",color:GACC,fontSize:12,fontWeight:700,flexShrink:0,transform:open?"rotate(90deg)":"none",transition:"transform .15s"}}>▸</button>
                     <span style={{fontSize:15,fontWeight:800,color:lightMode?"#0b3a46":"#d6f6ff",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}} title={u.key}>{u.key}</span>
@@ -12370,15 +12372,18 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
                   <div><span style={{fontSize:11,fontWeight:capped?800:700,color:capped?lmC("#ef4444"):lmTxtS}} title={capped?`Capped — group needs ${$m(npd)}/day but the combined daily budget is only ${$m(dailyBudSum)}`:""}>{npd==null?"—":$m(npd)}</span></div>
                   <div><span style={{fontSize:11,fontWeight:700,color:yCol}}>{yestSum>0?$m(yestSum):"—"}{yPct!=null&&yestSum>0?` ${Math.round(yPct)}%`:""}</span></div>
                   <div><span style={{fontSize:11,fontWeight:capped?800:700,color:capped?lmC("#ef4444"):lmC("#7dd3fc")}}>{dailyBudSum>0?$m(dailyBudSum):"—"}</span></div>
+                  {/* Metrics (full-grid) view adds CTR/VCR · Clicks · CPM/CPV · Budget · Freq — left blank on the
+                      group header (rates don't aggregate; per-line values are on the member rows below). */}
+                  {!spendOnly && <><div/><div/><div/><div/><div/></>}
                   <div/>
                 </div>
               );
             };
             return (
               <div className="pacing-hscroll">
-              <div style={{minWidth:1240}}>
+              <div style={{minWidth:spendOnly?1240:1720}}>
               <div style={{border:"1px solid "+lmBrd,borderRadius:9,overflow:"visible",background:lmBg}}>
-                <TableHeader spendOnly={true}/>
+                <TableHeader spendOnly={spendOnly}/>
                 {!uBuckets.some(b=>b.units.length>0) && <div style={{padding:"16px",textAlign:"center",fontSize:11,color:lmTxtS}}>Nothing at risk right now — toggle off “At risk only” to see all.</div>}
                 {uBuckets.map(b => b.units.length===0?null:(
                   <div key={b.key}>
@@ -12898,8 +12903,8 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
           fontSize:11.5,fontWeight:fExcludeZeroSpend?700:400,cursor:"pointer"}}>
         {fExcludeZeroSpend?"🚫 Hiding $0 spend":"🚫 Exclude $0 spend"}
       </button>
-      {/* Groups only — 💲 Spend view: show just the pacing groups (hide standalone lines like Premium RT / TD). */}
-      {pacingView==="spend" && campaigns.some(c=>(c.pacingGroup||"").trim()) && (
+      {/* Groups only — 💲 Spend view + 📊 Metrics ✈ Flights: show just the pacing groups (hide standalone lines). */}
+      {(pacingView==="spend"||pacingView==="lifetime") && campaigns.some(c=>(c.pacingGroup||"").trim()) && (
         <button onClick={()=>setFGroupsOnly(v=>!v)}
           title="Show only pacing groups — hides standalone lines (Premium RT, TradeDesk, etc.)"
           style={{display:"flex",alignItems:"center",gap:5,flexShrink:0,whiteSpace:"nowrap",transition:"all .15s",
