@@ -11032,7 +11032,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   // pacing-bar column is flex-heavy (1.6fr) so the bar itself stretches long across the extra width.
   const GRID_SPEND = "minmax(260px,1fr) 66px minmax(280px,1.2fr) 80px 124px 84px 84px 104px 84px 60px";
 
-  function TableRow({c,disp,pacing,monthlyGoal,flightChart,spendOnly}){
+  function TableRow({c,disp,pacing,monthlyGoal,flightChart,spendOnly,groupMember}){
     // Breakdown-expanded state is lifted to the parent (expandedRows Set, keyed by campaign id) so it
     // survives the row remounts that happen whenever any campaign changes — see expandedRows comment.
     // The shim preserves the existing setRowBreakdownOpen(bool) and setRowBreakdownOpen(v=>!v) calls.
@@ -11285,14 +11285,18 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     const _hasSpendReport = (parseFloat(c.tvsciLifetimeSpend)||0) > 0 || (parseFloat(c.tvsciDailyBudget)||0) > 0 || (c.tvsciYesterdaySpend!=null && String(c.tvsciYesterdaySpend)!=="");
     const canExpand = spendOnly ? _hasSpendReport : (!!rowBreakdown || hasWeekly || hasCreatives || primaryRaw > 0);
 
+    // Group members (lines rolling up to a pacing-group header) get a cyan rail + a faint tint + a ↳ indent
+    // so they visually hang under their group header instead of reading as standalone rows.
+    const _rowBg = groupMember ? (lightMode?"#eef9ff":"#05171c") : lmBg;
     return <React.Fragment>
-    <div style={{display:"grid",gridTemplateColumns:spendOnly?GRID_SPEND:GRID,gap:8,padding:"9px 16px",borderBottom:canExpand&&rowBreakdownOpen?"none":"1px solid "+lmBrdR,alignItems:"center",background:lmBg,borderLeft:"3px solid "+col}}>
+    <div style={{display:"grid",gridTemplateColumns:spendOnly?GRID_SPEND:GRID,gap:8,padding:"9px 16px",borderBottom:canExpand&&rowBreakdownOpen?"none":"1px solid "+lmBrdR,alignItems:"center",background:_rowBg,borderLeft:"3px solid "+(groupMember?"#00d9ff":col)}}>
 
       {/* Campaign name + freshness/flight sub-line. Partner name removed per the user (2026-07-17) —
           it's still searchable and shown in the edit modal, just not cluttering every pacing row.
           STICKY: pinned to the left so the campaign name stays visible when you scroll the table right. */}
-      <div style={{minWidth:0,position:"sticky",left:0,zIndex:2,background:lmBg,boxShadow:`6px 0 8px -6px rgba(0,0,0,${lightMode?0.16:0.55})`}}>
-        <div style={{fontSize:14,fontWeight:700,color:lmTxt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",display:"flex",alignItems:"center",gap:6}}>
+      <div style={{minWidth:0,position:"sticky",left:0,zIndex:2,background:_rowBg,boxShadow:`6px 0 8px -6px rgba(0,0,0,${lightMode?0.16:0.55})`}}>
+        <div style={{fontSize:groupMember?13:14,fontWeight:groupMember?600:700,color:lmTxt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",display:"flex",alignItems:"center",gap:6,marginLeft:groupMember?14:0}}>
+          {groupMember&&<span style={{color:"#00d9ff",fontSize:12,flexShrink:0,fontWeight:400}}>↳</span>}
           {canExpand&&(
             <button onClick={()=>setRowBreakdownOpen(v=>!v)}
               title={spendOnly
@@ -12341,10 +12345,10 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
               const yCol=yPct==null?lmTxtS:yPct>=70?lmC("#00d48a"):yPct>=40?lmC("#f59e0b"):lmC("#ef4444");
               const hb=lightMode?"#eaf6ff":"#071a20";
               return (
-                <div style={{display:"grid",gridTemplateColumns:GRID_SPEND,gap:8,padding:"9px 16px",borderBottom:"1px solid "+lmBrdR,alignItems:"center",background:hb,borderLeft:"3px solid "+GACC}}>
+                <div style={{display:"grid",gridTemplateColumns:GRID_SPEND,gap:8,padding:"11px 16px",borderTop:"2px solid "+GACC+"66",borderBottom:"1px solid "+lmBrdR,alignItems:"center",background:hb,borderLeft:"5px solid "+GACC}}>
                   <div style={{minWidth:0,position:"sticky",left:0,zIndex:2,background:hb,boxShadow:`6px 0 8px -6px rgba(0,0,0,${lightMode?0.16:0.55})`,display:"flex",alignItems:"center",gap:6}}>
-                    <button onClick={()=>toggleGroup(u.key)} style={{background:"none",border:"none",padding:0,cursor:"pointer",color:GACC,fontSize:11,fontWeight:700,flexShrink:0,transform:open?"rotate(90deg)":"none",transition:"transform .15s"}}>▸</button>
-                    <span style={{fontSize:13,fontWeight:800,color:lmTxt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}} title={u.key}>📦 {u.key}</span>
+                    <button onClick={()=>toggleGroup(u.key)} style={{background:"none",border:"none",padding:0,cursor:"pointer",color:GACC,fontSize:12,fontWeight:700,flexShrink:0,transform:open?"rotate(90deg)":"none",transition:"transform .15s"}}>▸</button>
+                    <span style={{fontSize:14,fontWeight:800,color:lightMode?"#0b3a46":"#d6f6ff",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}} title={u.key}>📦 {u.key}</span>
                     <span style={{flexShrink:0,fontSize:9,fontWeight:700,color:GACC,background:GACC+(lightMode?"18":"26"),border:`1px solid ${GACC}55`,borderRadius:3,padding:"0 5px"}}>{u.members.length} lines</span>
                   </div>
                   <div><span style={{fontSize:9,fontWeight:800,color:GACC,letterSpacing:"0.04em"}}>GROUP</span></div>
@@ -12385,7 +12389,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
                       ? <TableRow key={u.row.c.id} {...flightRowProps(u.row)}/>
                       : (<React.Fragment key={"grp:"+u.key}>
                           {renderGroupHeader(u)}
-                          {!groupCollapsed.has(u.key) && u.members.map(m => <TableRow key={m.c.id} {...flightRowProps(m)}/>)}
+                          {!groupCollapsed.has(u.key) && u.members.map(m => <TableRow key={m.c.id} {...flightRowProps(m)} groupMember={true}/>)}
                         </React.Fragment>)
                     )}
                   </div>
