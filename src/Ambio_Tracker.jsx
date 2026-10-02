@@ -11294,7 +11294,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       {/* Campaign name + freshness/flight sub-line. Partner name removed per the user (2026-07-17) —
           it's still searchable and shown in the edit modal, just not cluttering every pacing row.
           STICKY: pinned to the left so the campaign name stays visible when you scroll the table right. */}
-      <div style={{minWidth:0,position:"sticky",left:0,zIndex:2,background:_rowBg,boxShadow:`6px 0 8px -6px rgba(0,0,0,${lightMode?0.16:0.55})`,paddingLeft:groupMember?24:0}}>
+      <div style={{minWidth:0,position:"sticky",left:0,zIndex:2,background:_rowBg,boxShadow:`6px 0 8px -6px rgba(0,0,0,${lightMode?0.16:0.55})`,paddingLeft:groupMember?38:0}}>
         <div style={{fontSize:groupMember?12:14,fontWeight:groupMember?500:700,color:lmTxt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",display:"flex",alignItems:"center",gap:6}}>
           {canExpand&&(
             <button onClick={()=>setRowBreakdownOpen(v=>!v)}
@@ -12347,7 +12347,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
                 <div style={{display:"grid",gridTemplateColumns:GRID_SPEND,gap:8,padding:"11px 16px",borderTop:"2px solid "+GACC+"66",borderBottom:"1px solid "+lmBrdR,alignItems:"center",background:hb,borderLeft:"5px solid "+GACC}}>
                   <div style={{minWidth:0,position:"sticky",left:0,zIndex:2,background:hb,boxShadow:`6px 0 8px -6px rgba(0,0,0,${lightMode?0.16:0.55})`,display:"flex",alignItems:"center",gap:6}}>
                     <button onClick={()=>toggleGroup(u.key)} style={{background:"none",border:"none",padding:0,cursor:"pointer",color:GACC,fontSize:12,fontWeight:700,flexShrink:0,transform:open?"rotate(90deg)":"none",transition:"transform .15s"}}>▸</button>
-                    <span style={{fontSize:15,fontWeight:800,color:lightMode?"#0b3a46":"#d6f6ff",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}} title={u.key}>📦 {u.key}</span>
+                    <span style={{fontSize:15,fontWeight:800,color:lightMode?"#0b3a46":"#d6f6ff",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}} title={u.key}>{u.key}</span>
                     <span style={{flexShrink:0,fontSize:9,fontWeight:700,color:GACC,background:GACC+(lightMode?"18":"26"),border:`1px solid ${GACC}55`,borderRadius:3,padding:"0 5px"}}>{u.members.length} lines</span>
                   </div>
                   <div><span style={{fontSize:9,fontWeight:800,color:GACC,letterSpacing:"0.04em"}}>GROUP</span></div>
