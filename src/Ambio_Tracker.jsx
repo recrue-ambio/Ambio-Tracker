@@ -9834,6 +9834,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   const [fStatuses,      setFStatuses]      = useState(new Set(_persisted.fStatuses || [])); // multi-select status filter (Active / Pacing Behind / Off …), empty = all
   const [fExcludeGoalHit, setFExcludeGoalHit] = useState(false); // button removed from Pacing (goal-hit rows just sort to the bottom now); kept false so the filter plumbing stays a no-op
   const [fExcludeZeroSpend, setFExcludeZeroSpend] = useState(_persisted.fExcludeZeroSpend !== undefined ? !!_persisted.fExcludeZeroSpend : true); // hide $0-spend clutter — ON by default (the user), respects an explicit toggle-off
+  const [fGroupsOnly, setFGroupsOnly] = useState(!!_persisted.fGroupsOnly); // 💲 Spend view: show only pacing groups (hide standalone lines)
   // Pacing sort config. METRIC_SORTS = keys that read a numeric metric from the resolved `disp`.
   // SORT_DEFAULT_DIR = each key's starting direction. EVERY key is direction-toggleable (click the
   // active key again to reverse); ctr defaults low-first (worst), $/impr default high-first, text A–Z.
@@ -9868,10 +9869,10 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     try {
       localStorage.setItem(PACING_FILTER_KEY, JSON.stringify({
         search, searchTerms, fPartner, fPlatforms: [...fPlatforms], fStatuses: [...fStatuses], fExcludeGoalHit, fExcludeZeroSpend, sortKey, sortDir, todayFilter, updatedDays, pacingView,
-        troubleOnly, lifeSort, lifeDir, lifeAtRisk, lifeStartsAfter,
+        troubleOnly, lifeSort, lifeDir, lifeAtRisk, lifeStartsAfter, fGroupsOnly,
       }));
     } catch {}
-  }, [search, searchTerms, fPartner, fPlatforms, fStatuses, fExcludeGoalHit, fExcludeZeroSpend, sortKey, sortDir, todayFilter, updatedDays, pacingView, troubleOnly, lifeSort, lifeDir, lifeAtRisk, lifeStartsAfter]);
+  }, [search, searchTerms, fPartner, fPlatforms, fStatuses, fExcludeGoalHit, fExcludeZeroSpend, sortKey, sortDir, todayFilter, updatedDays, pacingView, troubleOnly, lifeSort, lifeDir, lifeAtRisk, lifeStartsAfter, fGroupsOnly]);
   function clickSort(k) {
     if (sortKey === k) { setSortDir(d => d === "asc" ? "desc" : "asc"); return; }  // toggle direction
     setSortKey(k);
@@ -10237,7 +10238,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   const onTrack = withGoal.filter(r=>r.pacing?.label==="On Track");
   const ahead   = withGoal.filter(r=>r.pacing?.label==="Ahead");
   const noPace  = withGoal.filter(r=>!r.pacing);
-  const anyFilter = q || searchTerms.length>0 || fPartner!=="all" || fPlatforms.size>0 || fStatuses.size>0 || fExcludeGoalHit || fExcludeZeroSpend || todayFilter!=="all" || troubleOnly;
+  const anyFilter = q || searchTerms.length>0 || fPartner!=="all" || fPlatforms.size>0 || fStatuses.size>0 || fExcludeGoalHit || fExcludeZeroSpend || todayFilter!=="all" || troubleOnly || fGroupsOnly;
 
   // ── Lifetime / contract pacing data ────────────────────────────────────────
   // Cumulative delivery across the WHOLE flight = every CLOSED month's final numbers
@@ -12321,11 +12322,13 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
               u.delivered=delivered; u.goalNum=goalNum; u.isOff=m.every(x=>x.isOff);
             });
             const uBucket = u => u.isOff ? "off" : ((u.lp.pct<1 && /Behind|Missed|short/i.test(u.lp.label||"")) ? "behind" : ((u.lp.pct>=1 || /Ahead|Goal hit|at goal/i.test(u.lp.label||"")) ? "ahead" : "ontrack"));
+            // "Groups only" toggle — drop the standalone (ungrouped) lines so just the pacing groups show.
+            const vUnits = fGroupsOnly ? units.filter(u=>u.type==="group") : units;
             const uBuckets = [
-              {key:"behind",label:"Behind",color:"#fde047",units:units.filter(u=>uBucket(u)==="behind")},
-              {key:"ontrack",label:"On Track",color:"#00d48a",units:units.filter(u=>uBucket(u)==="ontrack")},
-              {key:"ahead",label:"Ahead",color:"#f97316",units:units.filter(u=>uBucket(u)==="ahead")},
-              {key:"off",label:"Off",color:"#f87171",tint:true,units:units.filter(u=>uBucket(u)==="off")},
+              {key:"behind",label:"Behind",color:"#fde047",units:vUnits.filter(u=>uBucket(u)==="behind")},
+              {key:"ontrack",label:"On Track",color:"#00d48a",units:vUnits.filter(u=>uBucket(u)==="ontrack")},
+              {key:"ahead",label:"Ahead",color:"#f97316",units:vUnits.filter(u=>uBucket(u)==="ahead")},
+              {key:"off",label:"Off",color:"#f87171",tint:true,units:vUnits.filter(u=>uBucket(u)==="off")},
             ];
             const $m = n => (n<0?"-":"")+"$"+(Math.abs(n)>=1000?(Math.abs(n)/1000).toFixed(1)+"k":Math.round(Math.abs(n)));
             const GACC = "#00d9ff";
@@ -12895,6 +12898,19 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
           fontSize:11.5,fontWeight:fExcludeZeroSpend?700:400,cursor:"pointer"}}>
         {fExcludeZeroSpend?"🚫 Hiding $0 spend":"🚫 Exclude $0 spend"}
       </button>
+      {/* Groups only — 💲 Spend view: show just the pacing groups (hide standalone lines like Premium RT / TD). */}
+      {pacingView==="spend" && campaigns.some(c=>(c.pacingGroup||"").trim()) && (
+        <button onClick={()=>setFGroupsOnly(v=>!v)}
+          title="Show only pacing groups — hides standalone lines (Premium RT, TradeDesk, etc.)"
+          style={{display:"flex",alignItems:"center",gap:5,flexShrink:0,whiteSpace:"nowrap",transition:"all .15s",
+            background:lightMode?(fGroupsOnly?"#e0f7ff":"#f3f7f7"):(fGroupsOnly?"#06222b":"#0b2522"),
+            border:`1px solid ${fGroupsOnly?"#00d9ff":(lightMode?"#b6dccf":"#182f2c")}`,
+            borderRadius:7,padding:"6px 12px",
+            color:fGroupsOnly?(lightMode?"#0b3a46":"#7fe8ff"):(lightMode?"#527a75":"#d1ece5"),
+            fontSize:11.5,fontWeight:fGroupsOnly?700:400,cursor:"pointer"}}>
+          {fGroupsOnly?"◉ Groups only":"◎ Groups only"}
+        </button>
+      )}
       </div>
       {/* Sort — nine buttons collapsed into one dropdown + a direction toggle. clickSort(k) sets the
           key and its sensible default direction; the ↑/↓ button flips it. */}
@@ -12919,7 +12935,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       {/* Include the Off section's shown rows in the count when Trouble/crack-focus is on — otherwise a
           paused-but-spending focus reads "0" while its campaign sits visible in the Off section. */}
       <span style={{fontSize:11,color:lmTxtS}}>Showing {filtered.length + (troubleOnly ? offFiltered.length : 0)} of {allActive.length + (troubleOnly ? offRows.length : 0)}</span>
-      <button onClick={()=>{setSearch("");setSearchTerms([]);setFPartner("all");setFPlatforms(new Set());setFStatuses(new Set());setFExcludeGoalHit(false);setFExcludeZeroSpend(false);setTodayFilter("all");setTroubleOnly(false);setReasonFocus(null);}} style={{background:"none",border:"1px solid "+lmBrd,borderRadius:5,padding:"2px 8px",color:lmTxtM,fontSize:11,cursor:"pointer"}}>Clear filters</button>
+      <button onClick={()=>{setSearch("");setSearchTerms([]);setFPartner("all");setFPlatforms(new Set());setFStatuses(new Set());setFExcludeGoalHit(false);setFExcludeZeroSpend(false);setTodayFilter("all");setTroubleOnly(false);setReasonFocus(null);setFGroupsOnly(false);}} style={{background:"none",border:"1px solid "+lmBrd,borderRadius:5,padding:"2px 8px",color:lmTxtM,fontSize:11,cursor:"pointer"}}>Clear filters</button>
     </div>}
 
     {/* Row count — This Month only (Flight Total + Daily Digest have their own summary strips). */}
