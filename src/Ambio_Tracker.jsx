@@ -11296,7 +11296,6 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
           STICKY: pinned to the left so the campaign name stays visible when you scroll the table right. */}
       <div style={{minWidth:0,position:"sticky",left:0,zIndex:2,background:_rowBg,boxShadow:`6px 0 8px -6px rgba(0,0,0,${lightMode?0.16:0.55})`,paddingLeft:groupMember?24:0}}>
         <div style={{fontSize:groupMember?12:14,fontWeight:groupMember?500:700,color:lmTxt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",display:"flex",alignItems:"center",gap:6}}>
-          {groupMember&&<span style={{color:lmTxtD,fontSize:11,flexShrink:0,fontWeight:400}}>↳</span>}
           {canExpand&&(
             <button onClick={()=>setRowBreakdownOpen(v=>!v)}
               title={spendOnly
