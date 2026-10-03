@@ -11466,7 +11466,6 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
             : `Yesterday: ${fmtYmoney(yest.delivered)} · Needed/day: ${fmtYmoney(yest.neededPerDay)} · ${yest.status} (baseline ${fmtDate(yest.baseDate)} → ${fmtDate(today)})`}>
             <span style={{display:"inline-flex",alignItems:"baseline",gap:3,maxWidth:"100%",whiteSpace:"nowrap",fontSize:11,fontWeight:800,borderRadius:5,padding:"2px 6px",...chip}}>
               {fmtY}
-              {pctTxt&&<span style={{fontSize:9,fontWeight:700,opacity:.8}}>{pctTxt}</span>}
               {multiDay&&<span title={`Averaged over ${yest.gapDays} days — a check-in was skipped`} style={{fontSize:8,fontWeight:700,opacity:.7}}>{yest.gapDays}d</span>}
             </span>
           </div>
@@ -12370,7 +12369,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
                   <div style={{fontSize:11}}><span style={{fontWeight:800,color:lmC("#7dd3fc")}}>{$m(u.delivered)}</span> <span style={{color:lmTxtD}}>/ {$m(lp.expected||0)}</span></div>
                   <div><span style={{fontSize:11,fontWeight:700,color:gapCol}}>{gap==null?"—":(gap>=0?"+":"")+$m(gap)}</span></div>
                   <div><span style={{fontSize:11,fontWeight:capped?800:700,color:capped?lmC("#ef4444"):lmTxtS}} title={capped?`Capped — group needs ${$m(npd)}/day but the combined daily budget is only ${$m(dailyBudSum)}`:""}>{npd==null?"—":$m(npd)}</span></div>
-                  <div><span style={{fontSize:11,fontWeight:700,color:yCol}}>{yestSum>0?$m(yestSum):"—"}{yPct!=null&&yestSum>0?` ${Math.round(yPct)}%`:""}</span></div>
+                  <div><span style={{fontSize:11,fontWeight:700,color:yCol}}>{yestSum>0?$m(yestSum):"—"}</span></div>
                   <div><span style={{fontSize:11,fontWeight:capped?800:700,color:capped?lmC("#ef4444"):lmC("#7dd3fc")}}>{dailyBudSum>0?$m(dailyBudSum):"—"}</span></div>
                   {/* Metrics (full-grid) view adds CTR/VCR · Clicks · CPM/CPV · Budget · Freq — left blank on the
                       group header (rates don't aggregate; per-line values are on the member rows below). */}
