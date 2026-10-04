@@ -3283,9 +3283,13 @@ function parseAmbioEduIO(text) {
     : (()=>{ const [y,m,dd] = getToday().split("-"); return `${m}/${dd}/${y}`; })();
 
   const drafts = [];
+  // Non-TVsci standard (Austin/Adam): a flat 43% management fee → media spend = 57% of the gross (overall
+  // budget), regardless of what the IO itemizes. TVsci (PTV/DRT/VRT/PVRT/CTV/OTT) keeps the IO's own media.
+  const _TVSCI_PLATS = new Set(["PTV","DRT","VRT","PVRT","CTV","OTT","OTTD"]);
   const mk = (tacticLabel, platform, gross, media, note) => {
     if (!(gross > 0) && !(media > 0)) return;            // tactic included but no dollars → skip
     // gross = Contract Value (total the client pays); media = Media Spend budget; fee = gross − media.
+    if (!_TVSCI_PLATS.has(platform) && gross > 0) media = Math.round(gross * 0.57 * 100) / 100;  // 43% fee
     drafts.push({
       mediaPartner: "AMBIO",
       campaignName: (client ? client + " - " : "") + tacticLabel,   // "Client - Tactic" → auto-match by client+tactic
@@ -5795,10 +5799,21 @@ function Modal({ campaign, onSave, onClose, isNew, partners=[], reminders=[], se
                     const effectiveDt = dealBasis(f);
                     if(effectiveDt==="FEE"){
                       const media=parseFloat(f.budget)||0, cv=parseFloat(f.contractValue)||0, fee=Math.max(0,cv-media);
-                      if(!(cv>0&&media>0)) return <div style={{fontSize:10,color:_lm?"#97bab6":"#8fbfb6",marginTop:4}}>Enter Media Spend (above) + Contract Value (💰) to preview the fee</div>;
+                      // Non-TVsci standard (Austin/Adam): a flat 43% management fee → media spend = 57% of the
+                      // overall budget (Contract Value). Confirmation note + a one-click "set media to 57%" helper.
+                      const _nonTv = !["PTV","DRT","VRT","PVRT","CTV","OTT","OTTD"].includes(f.platform);
+                      const feeNote = _nonTv ? (
+                        <div style={{fontSize:10,color:_lm?"#527a75":"#bfe3da",marginTop:5,lineHeight:1.5,display:"flex",alignItems:"center",gap:7,flexWrap:"wrap"}}>
+                          <span>📌 Non-TVsci standard: <b style={{color:_lm?"#024744":"#00e19e"}}>43% management fee</b> — media = 57% of the overall budget.</span>
+                          {cv>0 && Math.abs(media - cv*0.57) > 1 && <button type="button" onClick={()=>set("budget",(cv*0.57).toFixed(2))}
+                            style={{background:_lm?"#dcfce7":"#002e24",border:"1px solid #00c896",borderRadius:5,padding:"2px 8px",color:_lm?"#024744":"#00e5a0",fontSize:10,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>⚡ Set media to 57% (${(cv*0.57).toLocaleString("en-US",{maximumFractionDigits:0})})</button>}
+                        </div>
+                      ) : null;
+                      if(!(cv>0&&media>0)) return <div style={{marginTop:4}}><div style={{fontSize:10,color:_lm?"#97bab6":"#8fbfb6"}}>Enter Media Spend (above) + Contract Value (💰) to preview the fee</div>{feeNote}</div>;
                       return <div style={{fontSize:11,color:_lm?"#024744":"#00e19e",fontWeight:700,marginTop:5}}>
                         Fee ${fee.toLocaleString("en-US",{maximumFractionDigits:0})} = ${cv.toLocaleString("en-US",{maximumFractionDigits:0})} contract − ${media.toLocaleString("en-US",{maximumFractionDigits:0})} media
                         <div style={{fontWeight:400,color:_lm?"#527a75":"#bfe3da",marginTop:2,lineHeight:1.5}}>Spread across the flight = your revenue (profit). If in-platform spend goes over ${media.toLocaleString("en-US",{maximumFractionDigits:0})}, the fee drops $1 for every $1 over — same as SEM.</div>
+                        {feeNote}
                       </div>;
                     }
                     if(!rate||!effectiveDt) return null;
