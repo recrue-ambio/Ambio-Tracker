@@ -17747,23 +17747,14 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
     }catch(e){ setFileError("TVsci sync failed: "+((e&&e.message)||e)); setSavedMsg(""); }
     finally{ setTvsciSyncing(false); }
   }
-  // Auto-stage the latest background sync when the panel opens (once per new sync), and keep the "last
-  // synced" stamp live from the background timer. Guard: don't clobber a manual drop already in review.
-  const fileRowsRef = React.useRef(fileRows);
-  useEffect(()=>{ fileRowsRef.current = fileRows; }, [fileRows]);
+  // Keep the "last synced" stamp live from the background timer, but DON'T auto-load the TVsci spend
+  // report into the panel (the user). Opening Quick Check-in should wait for you to pick a tactic / drop
+  // your own file — it used to auto-stage the cached spend sync on open (once per new background sync),
+  // which made it jump straight to the spend mapping. The synced spend still auto-applies to the 💲 Spend
+  // tab in the background for remembered lines; pull it into review on demand with the 🔄 Sync TVsci button.
   useEffect(()=>{
-    // Stage a synced CSV for review — but only ONCE per sync (last-staged guard), and never on top of a
-    // manual drop already being reviewed (fileRowsRef guard, checked live so the closure isn't stale).
-    const tryStage = (csv, at)=>{
-      if(!csv || !at) return;
-      let staged=""; try{ staged=localStorage.getItem("tvsci-last-staged")||""; }catch{}
-      if(at===staged) return;
-      if(fileRowsRef.current && fileRowsRef.current.length>0) return;
-      stageTvsciCsv(csv, at);
-    };
-    const onAuto = e => { if(e?.detail){ setLastTvsciSync(e.detail.at); tryStage(e.detail.csv, e.detail.at); } };
+    const onAuto = e => { if(e?.detail?.at) setLastTvsciSync(e.detail.at); };
     window.addEventListener("tvsci-autosync", onAuto);
-    try{ tryStage(localStorage.getItem("tvsci-cached-csv")||"", localStorage.getItem("tvsci-last-sync")||""); }catch{}
     return ()=>window.removeEventListener("tvsci-autosync", onAuto);
   }, []);
   const fmtSyncTime = (iso)=>{
