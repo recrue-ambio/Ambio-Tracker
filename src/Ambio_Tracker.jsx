@@ -9861,8 +9861,18 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   const [clearPendingId, setClearPendingId] = useState(null); // campaign id awaiting clear confirm
   const [todayFilter,    setTodayFilter]    = useState(_persisted.todayFilter || "all"); // "all" | "today" | "not-today"
   const [troubleOnly,    setTroubleOnly]    = useState(!!_persisted.troubleOnly); // show only KPI-yellow/red + severe pacers
-  // "Filter by issue" — when Trouble is on, narrow to ONE reason (ctr/cpm/pace/vcr/…). null = all troubles.
-  const [reasonFocus,    setReasonFocus]    = useState(null);
+  // "Filter by issue" — tri-state multi-select per reason (ctr/cpm/pace/vcr/…), mirroring the search chips:
+  // click cycles none → INCLUDE → EXCLUDE → none. reasonInc = OR-included reasons; reasonExc = reasons to hide.
+  const [reasonInc, setReasonInc] = useState(()=>new Set());
+  const [reasonExc, setReasonExc] = useState(()=>new Set());
+  const cycleReason = (key) => {
+    const ni = new Set(reasonInc), ne = new Set(reasonExc);
+    if(ni.has(key)){ ni.delete(key); ne.add(key); }        // include → exclude
+    else if(ne.has(key)){ ne.delete(key); }                // exclude → off
+    else { ni.add(key); }                                  // off → include
+    setReasonInc(ni); setReasonExc(ne);
+  };
+  const clearReasonFilters = () => { setReasonInc(new Set()); setReasonExc(new Set()); };
   // How many days back still counts as "updated" for the ✓/✕ pair. 1 = today only (the original
   // behaviour). Drops arrive in batches and a line checked yesterday isn't stale, so "today or
   // nothing" flagged too much — this widens the window without changing what the buttons mean.
@@ -10113,7 +10123,10 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   if(troubleOnly){
     [...allRows, ...offRows].forEach(r=>{ if(structPass(r.c) && statusPass(r) && excludeGoalHitPass(r) && excludeZeroSpendPass(r) && inView(r.c)){ reasonsOf(r).forEach(k=>{ reasonCounts[k]=(reasonCounts[k]||0)+1; }); } });
   }
-  const effReasonFocus = (troubleOnly && reasonFocus && reasonCounts[reasonFocus]>0) ? reasonFocus : null;
+  // Only reasons that actually occur in the current view count (a stale include/exclude for a reason with 0
+  // rows is ignored, so clearing a filter happens automatically when its rows drop out).
+  const effReasonInc = troubleOnly ? [...reasonInc].filter(k=>reasonCounts[k]>0) : [];
+  const effReasonExc = troubleOnly ? [...reasonExc].filter(k=>reasonCounts[k]>0) : [];
   const filtered = allRows.filter((row)=>{
     if(!structPass(row.c)) return false;
     if(!statusPass(row)) return false;
@@ -10124,7 +10137,9 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     // with monthly campaigns and vice-versa. inView = pacingView==="lifetime" ? flights : monthly.
     if(troubleOnly){
       if(!(inView(row.c) && rowIsTrouble(row))) return false;
-      if(effReasonFocus && !reasonsOf(row).includes(effReasonFocus)) return false;  // narrowed to one issue
+      const rr = reasonsOf(row);
+      if(effReasonInc.length && !effReasonInc.some(k=>rr.includes(k))) return false;  // include: needs ≥1 of these
+      if(effReasonExc.length && effReasonExc.some(k=>rr.includes(k))) return false;   // exclude: drop if it has any
       return true;
     }
     return true;
@@ -10161,7 +10176,9 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     if(!excludeZeroSpendPass(row)) return false;
     if(troubleOnly){
       if(!(inView(row.c) && rowIsTrouble(row))) return false;   // view-scoped off troubles (monthly vs flight)
-      if(effReasonFocus && !reasonsOf(row).includes(effReasonFocus)) return false;
+      const rr = reasonsOf(row);
+      if(effReasonInc.length && !effReasonInc.some(k=>rr.includes(k))) return false;
+      if(effReasonExc.length && effReasonExc.some(k=>rr.includes(k))) return false;
       return true;
     }
     return true;
@@ -10254,6 +10271,16 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   const ahead   = withGoal.filter(r=>r.pacing?.label==="Ahead");
   const noPace  = withGoal.filter(r=>!r.pacing);
   const anyFilter = q || searchTerms.length>0 || fPartner!=="all" || fPlatforms.size>0 || fStatuses.size>0 || fExcludeGoalHit || fExcludeZeroSpend || todayFilter!=="all" || troubleOnly || fGroupsOnly;
+
+  // Cross-view search awareness (the user): 📅 This Month and ✈ Flights are mutually-exclusive campaign
+  // sets, so a search typed in one tab silently hides matches that live in the OTHER tab. Find those hidden
+  // matches so we can alert + offer a one-click jump. Only when a search is active (chips or live box).
+  const searchActiveNow = searchTerms.length>0 || !!q;
+  const crossViewMatches = searchActiveNow
+    ? campaigns.filter(c => !inView(c) && campaignMatchesTerms(c, searchTermsActive))
+    : [];
+  const crossMonthly = crossViewMatches.filter(c=>!flightGoalLabel(c));   // would show in 📅 This Month
+  const crossFlights = crossViewMatches.filter(c=>!!flightGoalLabel(c));  // would show in ✈ Flights
 
   // ── Lifetime / contract pacing data ────────────────────────────────────────
   // Cumulative delivery across the WHOLE flight = every CLOSED month's final numbers
@@ -12834,7 +12861,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       </select>
       {/* Trouble filter — one click narrows the list to campaigns that need a look: a yellow OR red
           KPI (CTR / view rate / CPM vs the user's benchmarks) or a severe under/over pacer. */}
-      <button onClick={()=>setTroubleOnly(v=>{ if(v) setReasonFocus(null); return !v; })}
+      <button onClick={()=>setTroubleOnly(v=>{ if(v) clearReasonFilters(); return !v; })}
         title="Show only campaigns with a yellow/red KPI (CTR, view rate, or CPM) or severe under/over-pacing (fresh data only)"
         style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:7,cursor:"pointer",whiteSpace:"nowrap",fontSize:11.5,fontWeight:troubleOnly?700:500,flexShrink:0,
           background:troubleOnly?(lightMode?"#fef2f2":"#2a0b0b"):lmBgInp,
@@ -12954,8 +12981,40 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       {/* Include the Off section's shown rows in the count when Trouble/crack-focus is on — otherwise a
           paused-but-spending focus reads "0" while its campaign sits visible in the Off section. */}
       <span style={{fontSize:11,color:lmTxtS}}>Showing {filtered.length + (troubleOnly ? offFiltered.length : 0)} of {allActive.length + (troubleOnly ? offRows.length : 0)}</span>
-      <button onClick={()=>{setSearch("");setSearchTerms([]);setFPartner("all");setFPlatforms(new Set());setFStatuses(new Set());setFExcludeGoalHit(false);setFExcludeZeroSpend(false);setTodayFilter("all");setTroubleOnly(false);setReasonFocus(null);setFGroupsOnly(false);}} style={{background:"none",border:"1px solid "+lmBrd,borderRadius:5,padding:"2px 8px",color:lmTxtM,fontSize:11,cursor:"pointer"}}>Clear filters</button>
+      <button onClick={()=>{setSearch("");setSearchTerms([]);setFPartner("all");setFPlatforms(new Set());setFStatuses(new Set());setFExcludeGoalHit(false);setFExcludeZeroSpend(false);setTodayFilter("all");setTroubleOnly(false);clearReasonFilters();setFGroupsOnly(false);}} style={{background:"none",border:"1px solid "+lmBrd,borderRadius:5,padding:"2px 8px",color:lmTxtM,fontSize:11,cursor:"pointer"}}>Clear filters</button>
     </div>}
+
+    {/* Cross-view search awareness (the user): your search also matches campaigns that live in the OTHER tab
+        (📅 This Month vs ✈ Flights are separate sets). Alert + one-click jump so a search never silently hides
+        a campaign just because it's booked on the other basis. */}
+    {searchActiveNow && pacingView!=="digest" && (crossMonthly.length>0 || crossFlights.length>0) && (
+      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:12,
+        background:lightMode?"#fffbeb":"#2a2410",border:`1px solid ${lightMode?"#fde68a":"#5c4d16"}`,
+        borderRadius:8,padding:"7px 12px"}}>
+        <span style={{fontSize:13}}>🔎</span>
+        <span style={{fontSize:12,color:lightMode?"#854d0e":"#fde68a",fontWeight:600}}>
+          Also matching in the other tab:
+        </span>
+        {crossFlights.length>0 && pacingView!=="lifetime" && (
+          <button onClick={()=>{ setPacingView("lifetime"); setMetricsView("lifetime"); }}
+            title={crossFlights.slice(0,15).map(c=>"• "+(c.campaignName||"").trim()).join("\n")+(crossFlights.length>15?`\n…and ${crossFlights.length-15} more`:"")}
+            style={{fontSize:11.5,fontWeight:700,borderRadius:6,padding:"3px 10px",cursor:"pointer",
+              background:lightMode?"#e0f2fe":"#052e2a",border:`1px solid ${lightMode?"#7dd3fc":"#0e5a52"}`,
+              color:lightMode?"#0369a1":"#7dd3fc",whiteSpace:"nowrap"}}>
+            ✈ {crossFlights.length} in Flights →
+          </button>
+        )}
+        {crossMonthly.length>0 && pacingView!=="month" && (
+          <button onClick={()=>{ setPacingView("month"); setMetricsView("month"); }}
+            title={crossMonthly.slice(0,15).map(c=>"• "+(c.campaignName||"").trim()).join("\n")+(crossMonthly.length>15?`\n…and ${crossMonthly.length-15} more`:"")}
+            style={{fontSize:11.5,fontWeight:700,borderRadius:6,padding:"3px 10px",cursor:"pointer",
+              background:lightMode?"#dcfce7":"#002e24",border:`1px solid ${lightMode?"#86efac":"#0e5a3e"}`,
+              color:lightMode?"#047857":"#00e5a0",whiteSpace:"nowrap"}}>
+            📅 {crossMonthly.length} in This Month →
+          </button>
+        )}
+      </div>
+    )}
 
     {/* Row count — This Month only (Flight Total + Daily Digest have their own summary strips). */}
     {pacingView === "month" && (
@@ -13157,31 +13216,49 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     )}
 
     {/* "Filter by issue" chips — appear only under an active Trouble filter, one per KPI/reason that has
-        troubled campaigns (with a count). Click to narrow to just that issue (CTR/CPM/Pacing/…); click again
-        or "All" to clear. */}
+        troubled campaigns (with a count). Tri-state, same as the search chips: click once to INCLUDE just
+        that issue, again to EXCLUDE it (red, struck through), again to clear. Multiple includes are OR'd;
+        any exclude hides matching rows. "All" clears every issue filter. */}
     {troubleOnly && TROUBLE_REASON_ORDER.some(k=>reasonCounts[k]>0) && (
       <div style={{display:"flex", alignItems:"center", gap:6, flexWrap:"wrap", marginBottom:10}}>
         <span style={{fontSize:10, fontWeight:700, color:lmTxtS, textTransform:"uppercase", letterSpacing:"0.05em", whiteSpace:"nowrap"}}>Filter by issue:</span>
         {(()=>{
-          const chip = (key, label, count, color) => {
-            const active = effReasonFocus===key || (key===null && !effReasonFocus);
-            return (
-              <button key={key||"all"} onClick={()=> setReasonFocus(key===null ? null : (reasonFocus===key?null:key)) }
+          const red = "#ef4444";
+          const anyFilter = reasonInc.size>0 || reasonExc.size>0;
+          const chips = [];
+          // "All" — active only when nothing is filtered; click clears both sets.
+          chips.push(
+            <button key="all" onClick={clearReasonFilters}
+              style={{fontSize:11, fontWeight:700, borderRadius:6, padding:"3px 9px", cursor:"pointer", whiteSpace:"nowrap",
+                background: !anyFilter ? ((lightMode?"#0891b2":"#38bdf8")+(lightMode?"22":"33")) : lmBgInp,
+                border:`1px solid ${!anyFilter ? (lightMode?"#0891b2":"#38bdf8") : lmBrd}`,
+                color: !anyFilter ? (lightMode?"#0891b2":"#fff") : lmTxtS}}>
+              All
+              <span style={{marginLeft:5, fontSize:10, fontWeight:800, borderRadius:8, padding:"0 6px",
+                color: !anyFilter ? "#fff" : (lightMode?"#0891b2":"#38bdf8"),
+                background: !anyFilter ? (lightMode?"#0891b2":"#38bdf8") : ((lightMode?"#0891b2":"#38bdf8")+(lightMode?"22":"33"))}}>{troubleCount}</span>
+            </button>
+          );
+          TROUBLE_REASON_ORDER.filter(k=>reasonCounts[k]>0).forEach(k=>{
+            const label = TROUBLE_REASON_LABEL[k], count = reasonCounts[k], color = TROUBLE_REASON_COLOR[k];
+            const st = reasonInc.has(k) ? "inc" : reasonExc.has(k) ? "exc" : "off";
+            const brd = st==="inc" ? color : st==="exc" ? red : lmBrd;
+            const bg  = st==="inc" ? color+(lightMode?"22":"33") : st==="exc" ? red+(lightMode?"18":"26") : lmBgInp;
+            const txt = st==="inc" ? (lightMode?color:"#fff") : st==="exc" ? red : lmTxtS;
+            chips.push(
+              <button key={k} onClick={()=>cycleReason(k)}
+                title={st==="off" ? "Click to show only this issue" : st==="inc" ? "Including — click to EXCLUDE" : "Excluding — click to clear"}
                 style={{fontSize:11, fontWeight:700, borderRadius:6, padding:"3px 9px", cursor:"pointer", whiteSpace:"nowrap",
-                  background: active ? (color+ (lightMode?"22":"33")) : lmBgInp,
-                  border:`1px solid ${active ? color : lmBrd}`,
-                  color: active ? (lightMode?color:"#fff") : lmTxtS}}>
-                {label}
+                  background: bg, border:`1px solid ${brd}`, color: txt,
+                  textDecoration: st==="exc" ? "line-through" : "none"}}>
+                {st==="exc" ? "∅ " : ""}{label}
                 <span style={{marginLeft:5, fontSize:10, fontWeight:800, borderRadius:8, padding:"0 6px",
-                  color: active ? "#fff" : color,
-                  background: active ? color : (color + (lightMode?"22":"33"))}}>{count}</span>
+                  color: st==="off" ? color : "#fff",
+                  background: st==="inc" ? color : st==="exc" ? red : (color+(lightMode?"22":"33"))}}>{count}</span>
               </button>
             );
-          };
-          return [
-            chip(null, "All", troubleCount, lightMode?"#0891b2":"#38bdf8"),
-            ...TROUBLE_REASON_ORDER.filter(k=>reasonCounts[k]>0).map(k=> chip(k, TROUBLE_REASON_LABEL[k], reasonCounts[k], TROUBLE_REASON_COLOR[k]))
-          ];
+          });
+          return chips;
         })()}
       </div>
     )}
