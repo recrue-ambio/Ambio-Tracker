@@ -18949,11 +18949,14 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
         </label>
       )}
 
-      <div style={{display:"grid",gridTemplateColumns:fileRows?"1fr 1fr":"1fr",minHeight:200}}>
+      {/* Left checklist is capped (it only needs room for a name + platform badge) so the big empty gap
+          between name and badge is gone; the right MAPPING column takes all the remaining width, so the
+          "Your campaign" dropdowns get the space. Panels are also taller (more rows visible before scroll). */}
+      <div style={{display:"grid",gridTemplateColumns:fileRows?"minmax(300px, 440px) minmax(0, 1fr)":"1fr",minHeight:200}}>
 
         {/* ── Left: Campaign checklist ── */}
         <div style={{borderRight:fileRows?`1px solid ${_lm?"#c4e0d8":"#153632"}`:"none",display:"flex",flexDirection:"column"}}>
-          <div style={{maxHeight:320,overflowY:"auto",flex:1}}>
+          <div style={{maxHeight:460,overflowY:"auto",flex:1}}>
             {visibleCamps.length===0&&<div style={{padding:"18px",textAlign:"center",color:_lm?"#97bab6":"#8fbfb6",fontSize:12}}>No active campaigns match filter</div>}
             {visibleCamps.map(c=>{
               const sel=selected.has(c.id);
@@ -19252,12 +19255,12 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
             })()}
             {/* Column header — makes it unmistakable which side is the PLATFORM/file name and which is the
                 TRACKER campaign it maps to (the user: names aren't always 100%, so label which is which). */}
-            <div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 10px",borderBottom:`1px solid ${_lm?"#c4e0d8":"#153632"}`,fontSize:9,fontWeight:800,textTransform:"uppercase",letterSpacing:"0.05em"}}>
+            <div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 20px 4px 10px",borderBottom:`1px solid ${_lm?"#c4e0d8":"#153632"}`,fontSize:9,fontWeight:800,textTransform:"uppercase",letterSpacing:"0.05em"}}>
               <span style={{flex:1,minWidth:0,color:_lm?"#0369a1":"#7dd3fc"}}>📄 Name in file</span>
               <span style={{color:_lm?"#97bab6":"#8fbfb6"}}>→</span>
-              <span style={{minWidth:160,maxWidth:230,color:_lm?"#024744":"#00c896"}}>🎯 Your campaign</span>
+              <span style={{flex:"1.4 1 0",minWidth:220,maxWidth:560,color:_lm?"#024744":"#00c896"}}>🎯 Your campaign</span>
             </div>
-            <div style={{maxHeight:320,overflowY:"auto",flex:1}}>
+            <div style={{maxHeight:460,overflowY:"auto",flex:1}}>
               {(rowOrder && rowOrder.length===fileRows.length ? rowOrder : fileRows.map((_,i)=>i)).map((i)=>{
                 const row=fileRows[i];
                 const m=extractMetrics(row,fileSource);
@@ -19305,7 +19308,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
                       background:isPickTarget?(_lm?"#fffbeb":"#1a1000"):isLowConf?(_lm?"#fff7ed":"#100800"):assigned?(_lm?"#ddf2ea":"#001a0e"):isUnmatched?(_lm?"#fffbeb":"#130b00"):"transparent",
                       cursor:isPickTarget?"pointer":"default",
                       outline:isPickTarget?"1px solid #f59e0b40":isLowConf?"1px solid #f59e0b20":"none"}}>
-                    <div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 10px"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 20px 6px 10px"}}>
                       <div style={{flex:1,minWidth:0}}>
                         <div style={{display:"flex",alignItems:"center",gap:4}}>
                           <div style={{fontSize:13,color:isUnmatched?"#f59e0b":(_lm?"#0f172a":"#e3edec"),overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:isUnmatched?700:600,flex:1}} title={fileSource==="TradeDesk"?(ttdAdvName+" → "+name):name}>
@@ -19416,7 +19419,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
                         const canRevealMore = !showingAll && _reachable.length > displayList.length;
 
                         return (
-                          <div style={{display:"flex",flexDirection:"column",gap:2,minWidth:160,maxWidth:230}}>
+                          <div style={{display:"flex",flexDirection:"column",gap:2,flex:"1.4 1 0",minWidth:220,maxWidth:560}}>
                             <div style={{fontSize:9,color:_lm?"#789e99":"#bfe3da",textAlign:"right",display:"flex",justifyContent:"flex-end",alignItems:"center",gap:4}}>
                               {isTTD && !showingAll && <span style={{color:"#b6cfcc",fontSize:9}}>TD/TDA/TDV</span>}
                               {(isFiltered||isTTD||canRevealMore) && (
