@@ -3357,6 +3357,105 @@ function parseAmbioEduIO(text) {
     totalBudget, totalMedia, totalFee, mediaSum, reconOk, drafts };
 }
 
+// ── AmbioEdu "Digital Advertising Media Planner" PROPOSAL parser ──────────────────────────────────────
+// A different AmbioEdu doc than the Formsite IO above: products down the left, monthly columns (Oct-26…),
+// rows for Total Campaign Budget / Management Fee / Est CPM / Impression Goal / Marketing Dollars (SEM uses
+// Monthly Budget / Spend / Clicks). Builds the SAME FEE drafts as the IO flow, using the proposal's OWN
+// media + gross per product (it states both — a flat ~28% fee here, so we DON'T force the 43%/57% non-TVsci
+// override). Skips social (Meta/Stories & Reels, Snapchat, LinkedIn, TikTok) + non-media rows (Creative
+// Development, Audience Segments / data collection). Budget = flight TOTAL (media summed across the flight
+// months). Everything still goes through the IO review modal before being added. Returns {isProposal,drafts,…}.
+function parseAmbioEduProposal(text){
+  const t = String(text||"");
+  const isProposal = /Digital\s+Advertising\s+Media\s+Planner/i.test(t)
+    || (/Total\s+Marketing\s+Dollars/i.test(t) && /Estimated\s+Impression\s+Goal/i.test(t)
+        && /PERFORMANCE\s+TELEVISION|TARGETED\s+DISPLAY|PROGRAMMATIC\s+RETARGETING/i.test(t));
+  if(!isProposal) return { isProposal:false, drafts:[] };
+  const num = s => parseFloat(String(s).replace(/[$,\s]/g,""))||0;
+
+  // Campaign label — the "To:" field ("Newman Fall 2026 Transfer/Pathways"), else "Media Planner for:".
+  let label = (t.match(/\bTo:\s*\n+\s*([^\n]+)/i)||[])[1] || "";
+  if(!label) label = (t.match(/Media\s+Planner\s+for:?\s*\n*\s*([^\n]+)/i)||[])[1] || "";
+  label = String(label).replace(/https?:\/\/\S+/g,"").replace(/\s+/g," ").trim();
+  if(/^product$/i.test(label)) label="";   // guard: don't grab the table header
+
+  // Flight dates from the month headers ("Oct-26" …): start = 1st of earliest, end = last day of latest.
+  const MON={jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
+  const monKeys=[...t.matchAll(/\b([A-Za-z]{3})-(\d{2})\b/g)].map(m=>{const mo=MON[m[1].toLowerCase()]; return mo==null?null:(2000+parseInt(m[2]))*12+mo;}).filter(k=>k!=null);
+  let startIso="", endIso="";
+  if(monKeys.length){
+    const minK=Math.min(...monKeys), maxK=Math.max(...monKeys);
+    const p=n=>String(n+1).padStart(2,"0"); const eY=Math.floor(maxK/12), eM=maxK%12, sY=Math.floor(minK/12), sM=minK%12;
+    startIso=`${sY}-${p(sM)}-01`; endIso=`${eY}-${p(eM)}-${String(new Date(eY,eM+1,0).getDate()).padStart(2,"0")}`;
+  }
+
+  // product → platform. TARGETED DISPLAY before PROGRAMMATIC RETARGETING: when they share one block (the
+  // Display line labels itself both ways) the FIRST match wins → TD. A standalone PROGRAMMATIC block → DRT.
+  const MAP=[
+    { re:/PERFORMANCE\s+TELEVISION/i,   tactic:"PTV",              platform:"PTV" },
+    { re:/PREMIUM\s+RETARGETING/i,      tactic:"Premium Video RT", platform:"PVRT" },
+    { re:/TARGETED\s+DISPLAY/i,         tactic:"Display",          platform:"TD" },
+    { re:/PROGRAMMATIC\s+RETARGETING/i, tactic:"Display RT",       platform:"DRT" },
+    { re:/DIGITAL\s+AUDIO/i,            tactic:"Audio",            platform:"TDA" },
+    { re:/BRANDED\s+PAID\s+SEARCH|PAID\s+SEARCH\s*\(SEM\)/i, tactic:"SEM", platform:"SEM", sem:true },
+  ];
+  // All section headers (mapped + skipped: social, creative, grand-total) so each product's text is bounded.
+  const anyHeader=/(PERFORMANCE\s+TELEVISION|PREMIUM\s+RETARGETING|PROGRAMMATIC\s+RETARGETING|TARGETED\s+DISPLAY|DIGITAL\s+AUDIO\s+PLACEMENT|BRANDED\s+PAID\s+SEARCH|STORIES\s*&?\s*REELS|SNAP\w*|LINKED\s*IN|TIK\s*TOK|CREATIVE\s+DEVELOPMENT|AUDIENCE\s+SEGMENTS|Total\s+Marketing\s+Budget)/ig;
+  const headers=[]; let hm; while((hm=anyHeader.exec(t))) headers.push({idx:hm.index, name:hm[1]});
+  headers.sort((a,b)=>a.idx-b.idx);
+
+  // pdf.js lays each row out as the 4 monthly cells + a 5th "Total" cell, so the flight total is the LAST
+  // number in a row's span. Values come as "500.00\n$\n" (number then $), so don't anchor on $ — just read
+  // every numeric token in the span and take the last.
+  const ROW=/(Total\s+Campaign\s+Budget|Total\s+Management\s+Fee|Estimated\s+CPM|Estimated\s+Impression\s+Goal|Total\s+Marketing\s+Dollars|Monthly\s+Budget|Monthly\s+Management\s+Fee|\bSpend\b|Clicks\s+Won)/i;
+  const MONEYROW=/Total\s+Marketing\s+Dollars|Total\s+Campaign\s+Budget|\bSpend\b|Monthly\s+Budget/i;
+  const rowSpan=(sec,re)=>{ const m=sec.match(re); if(!m) return ""; const rest=sec.slice(m.index+m[0].length); const n=rest.search(ROW); return n>=0?rest.slice(0,n):rest; };
+  const lastNum=(sec,re)=>{ const s=rowSpan(sec,re); if(!s) return null; const a=[...s.matchAll(/(\d[\d,]*(?:\.\d+)?)/g)].map(x=>num(x[1])).filter(n=>n>0); return a.length?a[a.length-1]:null; };
+
+  // Group label-only headers (no money row before the next header) into the following REAL product, so a
+  // sub-label like "PROGRAMMATIC RETARGETING" under "TARGETED DISPLAY" joins the one display block.
+  const products=[]; let group=[];
+  for(let i=0;i<headers.length;i++){
+    const h=headers[i], nxt=headers[i+1];
+    const sec=t.slice(h.idx, nxt?nxt.idx:t.length);
+    group.push(h.name);
+    if(MONEYROW.test(sec)){ products.push({ names:[...group], sec }); group=[]; }
+  }
+
+  const stamp=(()=>{ const [y,m,d]=getToday().split("-"); return `${m}/${d}/${y}`; })();
+  const drafts=[];
+  products.forEach(pr=>{
+    const prod = MAP.find(mp => pr.names.some(n=>mp.re.test(n)));
+    if(!prod) return;   // skipped product (social / creative / grand-total) — no mapped tactic
+    const sec=pr.sec;
+    let media, gross, impr=null, extra="";
+    if(prod.sem){
+      gross=lastNum(sec,/Monthly\s+Budget/i); media=lastNum(sec,/\bSpend\b/i);
+      const clk=lastNum(sec,/Clicks\s+Won/i); if(clk) extra=`~${clk.toLocaleString()} clicks goal`;
+    } else {
+      gross=lastNum(sec,/Total\s+Campaign\s+Budget/i); media=lastNum(sec,/Total\s+Marketing\s+Dollars/i);
+      impr=lastNum(sec,/Estimated\s+Impression\s+Goal/i);
+    }
+    if(!(media>0) && !(gross>0)) return;
+    // Ambio bills a MANAGEMENT FEE, not CPM: dealType FEE → revenue = contractValue(gross) − budget(media).
+    // The proposal states the gross + media per product, so the fee lands exactly on its stated mgmt fee.
+    const fee = (gross>0 && media>0) ? Math.round((gross-media)*100)/100 : null;
+    drafts.push({
+      mediaPartner:"AMBIO",
+      campaignName:(label?label+" - ":"")+prod.tactic,
+      platform:prod.platform, startDate:startIso, endDate:endIso,
+      status:"off", dealType:"FEE",
+      budget: media>0?media.toFixed(2):"", contractValue: gross>0?gross.toFixed(2):"",
+      goal:"", note1:"",
+      note2:[fee!=null?`Mgmt fee $${fee.toFixed(2)}`:"", impr?`~${impr.toLocaleString()} impr goal`:"", extra].filter(Boolean).join(" · "),
+      _fromProposal:true,
+      history:`${stamp} — From proposal${label?" ("+label+")":""}: ${prod.tactic} — media $${(media||0).toFixed(2)}, mgmt fee $${fee!=null?fee.toFixed(2):"?"}, contract $${(gross||0).toFixed(2)}`,
+    });
+  });
+
+  return { isProposal:true, client:label, campaignName:label, submitted:(t.match(/(\d{1,2}\/\d{1,2}\/\d{4})/)||[])[1]||"", drafts };
+}
+
 // Last-resort, format-agnostic draft builder. When the structured parser finds no service blocks or
 // can't build a draft (an IO format we don't recognize), scan the WHOLE document for the few things
 // every IO has — dollars, impressions, dates, a CPM, a platform keyword — and produce ONE best-effort
@@ -25152,6 +25251,23 @@ export default function App() {
         setPdfProcessing(false);
         return;
       }
+      // AmbioEdu PROPOSAL (Media Planner — products × monthly columns). Different doc than the Formsite IO
+      // above; its per-product FEE drafts (media + contract from the proposal, skipping social) go straight
+      // into the same review queue. This is what the "Drop Proposal" button feeds, but it's auto-detected
+      // so either drop box works.
+      const proposal = parseAmbioEduProposal(text);
+      if (proposal.isProposal && proposal.drafts.length) {
+        setPdfDrafts(prev => {
+          const base = Array.isArray(prev) ? prev : [];
+          const merged = [...base, ...proposal.drafts];
+          setPdfMeta({ reference: "", partner: "AMBIO", advertiser: proposal.client, submitted: proposal.submitted, fileName: file.name, _initialCount: merged.length, lowConfidence: false, isProposal: true });
+          setPdfDraftIdx(base.length);
+          return merged;
+        });
+        if (!silent) setPdfQueueOpen(true);
+        setPdfProcessing(false);
+        return;
+      }
       const io = parseIOPdf(text, uris);
       // Structured parse first; if it yields nothing (unrecognized format / fields didn't parse),
       // fall back to a best-effort whole-document scan so the user ALWAYS gets a draft to review.
@@ -26799,6 +26915,18 @@ export default function App() {
               title="Open the IO PDF drop box (or drop a PDF right here)">
               {pdfProcessing ? "⏳ Parsing…" : "📄 Drop IO PDF"}
             </button>
+            {/* 📑 Drop Proposal — same drop box + review queue as Drop IO, but tuned for the AmbioEdu Media
+                Planner PROPOSAL format (products × monthly columns). Auto-detected, so it shares the handler;
+                social (Meta/Snap/LinkedIn/TikTok) and creative/data rows are skipped. */}
+            <button
+              onClick={()=>{ if(!pdfProcessing) setIoDropOpen(true); }}
+              onDragOver={e=>{ e.preventDefault(); if(!pdfProcessing){ e.currentTarget.style.background=lightMode?"#bfdbfe":"#0b2540"; e.currentTarget.style.borderColor=lightMode?"#2563eb":"#60a5fa"; } }}
+              onDragLeave={e=>{ e.currentTarget.style.background=lightMode?"#dbeafe":"#0a1f33"; e.currentTarget.style.borderColor=lightMode?"#3b82f6":"#3b82f640"; }}
+              onDrop={e=>{ e.preventDefault(); e.currentTarget.style.background=lightMode?"#dbeafe":"#0a1f33"; e.currentTarget.style.borderColor=lightMode?"#3b82f6":"#3b82f640"; if(pdfProcessing) return; const file=e.dataTransfer.files&&e.dataTransfer.files[0]; if(file) handleIOPdfDrop(file); }}
+              style={{background:lightMode?"#dbeafe":"#0a1f33",border:lightMode?"1px solid #3b82f6":"1px solid #3b82f640",borderRadius:7,padding:"6px 13px",color:lightMode?"#1d4ed8":"#93c5fd",fontWeight:700,fontSize:13,cursor:"pointer",display:"inline-flex",alignItems:"center",gap:6,opacity:pdfProcessing?0.6:1,transition:"background .15s, border-color .15s"}}
+              title="Open the drop box (or drop a proposal PDF right here) — parses the AmbioEdu Media Planner proposal into draft campaigns">
+              {pdfProcessing ? "⏳ Parsing…" : "📑 Drop Proposal"}
+            </button>
             {/* Pending IO drafts chip — appears when user closed the modal without
                 finishing the queue. One click reopens the next draft for review. */}
             {pdfDrafts && pdfDrafts.length > 0 && !pdfQueueOpen && (
@@ -28338,7 +28466,7 @@ export default function App() {
         <div onClick={()=>setIoDropOpen(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:300,backdropFilter:"blur(3px)"}}>
           <div onClick={e=>e.stopPropagation()} style={{background:lightMode?"#eaf5f1":"#0b2522",border:`1px solid ${lightMode?"#c4e0d8":"#182f2c"}`,borderRadius:14,width:"min(560px,94vw)",padding:18,boxShadow:"0 30px 80px rgba(0,0,0,.55)"}}>
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
-              <span style={{fontSize:15,fontWeight:800,color:lightMode?"#d97706":"#fbbf24"}}>📄 Drop IO PDF</span>
+              <span style={{fontSize:15,fontWeight:800,color:lightMode?"#d97706":"#fbbf24"}}>📄 Drop IO or Proposal PDF</span>
               <button onClick={()=>setIoDropOpen(false)} style={{background:"none",border:"none",color:lightMode?"#97bab6":"#bfe3da",fontSize:18,cursor:"pointer",lineHeight:1}}>×</button>
             </div>
             <label style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:9,padding:"42px 20px",border:`2px dashed ${lightMode?"#f59e0b":"#f59e0b66"}`,borderRadius:12,background:lightMode?"#fffbeb":"#1a1208",cursor:"pointer",textAlign:"center"}}
@@ -28346,7 +28474,7 @@ export default function App() {
               onDragLeave={e=>{e.currentTarget.style.background=lightMode?"#fffbeb":"#1a1208";e.currentTarget.style.borderColor=lightMode?"#f59e0b":"#f59e0b66";}}
               onDrop={e=>{e.preventDefault();e.currentTarget.style.background=lightMode?"#fffbeb":"#1a1208";e.currentTarget.style.borderColor=lightMode?"#f59e0b":"#f59e0b66";const file=e.dataTransfer.files&&e.dataTransfer.files[0];if(file){ handleIOPdfDrop(file); setIoDropOpen(false); }}}>
               <span style={{fontSize:34,lineHeight:1}}>📄</span>
-              <span style={{fontSize:14,fontWeight:700,color:lightMode?"#d97706":"#fbbf24"}}>Drag &amp; drop your IO PDF here</span>
+              <span style={{fontSize:14,fontWeight:700,color:lightMode?"#d97706":"#fbbf24"}}>Drag &amp; drop your IO or Proposal PDF here</span>
               <span style={{fontSize:11.5,color:lightMode?"#a16207":"#b08344"}}>or click to browse — auto-extracts campaigns into review drafts</span>
               <input type="file" accept=".pdf,application/pdf" style={{display:"none"}} onChange={e=>{ const file=e.target.files[0]; e.target.value=""; if(file){ handleIOPdfDrop(file); setIoDropOpen(false); } }}/>
             </label>
