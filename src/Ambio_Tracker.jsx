@@ -5313,15 +5313,24 @@ function Modal({ campaign, onSave, onClose, isNew, partners=[], reminders=[], se
             const isCPV = f.dealType === "CPV" || plat === "YT";
             const isSEM = plat === "SEM";
             const isEmail = plat === "EMAIL";                        // EMAIL bills per-drop/matchback — no CPM/impression goal
+            const isFee = dealBasis(f) === "FEE";                     // Ambio bills a MANAGEMENT FEE on spend — no CPM/impression goal
             const rate  = parseFloat(f.contractRate) || 0;
             const goalN = parseGoalNumber(f.goal);
             const cv    = parseFloat(f.contractValue) || 0;
+            const budgetN = parseFloat(f.budget) || 0;
             const nm    = (f.campaignName || "").trim().toLowerCase();
             const w = [];
-            if (rate <= 0 && !isSEM && !isEmail) w.push(`No ${isCPV ? "CPV" : "CPM"} rate — revenue can't calculate until you set one.`);
-            if (goalN <= 0 && !isSEM && !isEmail) w.push(`No ${isCPV ? "view" : "impression"} goal set.`);
+            // FEE / spend model (Ambio): revenue = management fee (Contract Value − Media Spend), NOT CPM ×
+            // impressions. So don't require a CPM/view rate or an impression goal — check that spend + a fee
+            // are set instead (the user: "as long as the management fee is set and spend is set").
+            if (rate <= 0 && !isSEM && !isEmail && !isFee) w.push(`No ${isCPV ? "CPV" : "CPM"} rate — revenue can't calculate until you set one.`);
+            if (goalN <= 0 && !isSEM && !isEmail && !isFee) w.push(`No ${isCPV ? "view" : "impression"} goal set.`);
+            if (isFee && !isSEM && !isEmail) {
+              if (budgetN <= 0) w.push("No media spend set — enter the spend so pacing and the fee can calculate.");
+              if (feeTotal(f) <= 0) w.push("No management fee — set a Contract Value (total the client pays) so revenue can book.");
+            }
             // Rate-typo guard — platform-aware (vs your own usual rate for the platform, else a sane band).
-            if (!isSEM && !isEmail) { const rw = rateSanity(f.platform, f.dealType, f.contractRate, learnRatesByPlatform(campaigns)[f.platform]); if (rw) w.push(rw); }
+            if (!isSEM && !isEmail && !isFee) { const rw = rateSanity(f.platform, f.dealType, f.contractRate, learnRatesByPlatform(campaigns)[f.platform]); if (rw) w.push(rw); }
             // (Removed the "budget ≠ rate × goal" check — Contract Value AUTO-FILLS from goal × rate, so it
             //  only ever mismatched for the one render between a goal keystroke and the auto-fill catching
             //  up, which made the whole banner flash on every keystroke. The auto-fill keeps them in sync.)
