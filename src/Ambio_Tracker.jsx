@@ -10272,15 +10272,21 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   const noPace  = withGoal.filter(r=>!r.pacing);
   const anyFilter = q || searchTerms.length>0 || fPartner!=="all" || fPlatforms.size>0 || fStatuses.size>0 || fExcludeGoalHit || fExcludeZeroSpend || todayFilter!=="all" || troubleOnly || fGroupsOnly;
 
-  // Cross-view search awareness (the user): 📅 This Month and ✈ Flights are mutually-exclusive campaign
-  // sets, so a search typed in one tab silently hides matches that live in the OTHER tab. Find those hidden
-  // matches so we can alert + offer a one-click jump. Only when a search is active (chips or live box).
+  // Cross-view search awareness (the user): the banner only bridges the REAL divide — 📅 This Month
+  // (monthly-goal campaigns) vs ✈ Flights (flight campaigns) — because those are mutually-exclusive sets,
+  // so a search in one genuinely hides matches that only live in the other. It must NOT fire across the
+  // 💲 Spend ↔ ✈ Flights overlap: Spend is just the TVsci-only LENS on the same flight campaigns, so
+  // nearly every account has lines in both and "also in Flights" would be trivially always-true (noise).
+  // So bucket purely by the monthly/flight split (flightGoalLabel), independent of the Spend TVsci filter,
+  // and only surface the bucket for the OTHER side of that split than the view you're in.
   const searchActiveNow = searchTerms.length>0 || !!q;
-  const crossViewMatches = searchActiveNow
-    ? campaigns.filter(c => !inView(c) && campaignMatchesTerms(c, searchTermsActive))
-    : [];
-  const crossMonthly = crossViewMatches.filter(c=>!flightGoalLabel(c));   // would show in 📅 This Month
-  const crossFlights = crossViewMatches.filter(c=>!!flightGoalLabel(c));  // would show in ✈ Flights
+  const _inFlightView = pacingView==="lifetime" || pacingView==="spend";   // both are flight-based lenses
+  const _inMonthView  = pacingView==="month";
+  const _crossHits = searchActiveNow ? campaigns.filter(c=>campaignMatchesTerms(c, searchTermsActive)) : [];
+  // From a flight-based view (Spend or Flights) → only alert about monthly campaigns (the separate set).
+  const crossMonthly = _inFlightView ? _crossHits.filter(c=>!flightGoalLabel(c)) : [];
+  // From This Month → only alert about flight campaigns.
+  const crossFlights = _inMonthView  ? _crossHits.filter(c=>!!flightGoalLabel(c)) : [];
 
   // ── Lifetime / contract pacing data ────────────────────────────────────────
   // Cumulative delivery across the WHOLE flight = every CLOSED month's final numbers
