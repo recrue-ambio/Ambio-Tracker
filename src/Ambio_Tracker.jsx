@@ -5896,14 +5896,18 @@ function Modal({ campaign, onSave, onClose, isNew, partners=[], reminders=[], se
                       <option value="FEE">Mgmt Fee</option>
                     </select>
                     {dealBasis(f)==="FEE" ? (
-                      /* Management Fee is DERIVED: Contract Value − Media Spend = your revenue/profit. Shown
-                         read-only so there's one source of truth (enter Media Spend above + Contract Value in
-                         the 💰 field). Overspending the media budget docks this fee — see the note below. */
+                      /* Management Fee = your revenue/profit. EDITABLE (the user works on spend + fee): type the
+                         fee here → Contract Value (total) = Media Spend + fee. Entering Contract Value in the 💰
+                         field above keeps it in sync too (fee = Contract Value − Media Spend). Overspending the
+                         media budget docks the fee — see the note below. */
                       (()=>{ const media=parseFloat(f.budget)||0, cv=parseFloat(f.contractValue)||0, fee=Math.max(0,cv-media);
                         return (
-                        <div style={{display:"flex",alignItems:"center",flex:1,background:_lm?"#e8f4ef":"#122b28",border:`1px solid ${fee>0?(_lm?"#00c896":"#00c89660"):(_lm?"#c4e0d8":"#274642")}`,borderRadius:6,overflow:"hidden"}} title="Management Fee = Contract Value − Media Spend = your revenue/profit">
+                        <div style={{display:"flex",alignItems:"center",flex:1,background:_lm?"#e8f4ef":"#122b28",border:`1px solid ${fee>0?(_lm?"#00c896":"#00c89660"):(_lm?"#c4e0d8":"#274642")}`,borderRadius:6,overflow:"hidden"}} title="Management Fee = your revenue/profit. Type it here (sets Contract Value = Media Spend + fee), or enter Contract Value above.">
                           <span style={{padding:"7px 8px",color:"#34d399",fontWeight:700,fontSize:13,background:_lm?"#e2f0ea":"#0b2522",borderRight:`1px solid ${_lm?"#c4e0d8":"#274642"}`}}>$</span>
-                          <span style={{flex:1,minWidth:0,padding:"7px 8px",color:fee>0?(_lm?"#024744":"#00e19e"):(_lm?"#97bab6":"#8fbfb6"),fontSize:13,fontWeight:700}}>{fee>0?fee.toLocaleString("en-US",{maximumFractionDigits:0}):"—"}</span>
+                          <input type="number" step="0.01" value={cv>0?fee:""}
+                            onChange={e=>{ const v=parseFloat(e.target.value); setCvTouched(true); set("contractValue", (v>0 ? (media+v) : "").toString()); }}
+                            placeholder="management fee"
+                            style={{flex:1,minWidth:0,background:"transparent",border:"none",padding:"7px 8px",color:fee>0?(_lm?"#024744":"#00e19e"):(_lm?"#0f172a":"#e3edec"),fontSize:13,fontWeight:700,outline:"none"}}/>
                           <span style={{padding:"7px 8px",color:"#34d399",fontWeight:700,fontSize:12,background:_lm?"#e2f0ea":"#0b2522",borderLeft:`1px solid ${_lm?"#c4e0d8":"#274642"}`,whiteSpace:"nowrap"}}>mgmt fee</span>
                         </div>
                         ); })()
@@ -5927,17 +5931,20 @@ function Modal({ campaign, onSave, onClose, isNew, partners=[], reminders=[], se
                     const effectiveDt = dealBasis(f);
                     if(effectiveDt==="FEE"){
                       const media=parseFloat(f.budget)||0, cv=parseFloat(f.contractValue)||0, fee=Math.max(0,cv-media);
-                      // Non-TVsci standard (Austin/Adam): a flat 43% management fee → media spend = 57% of the
-                      // overall budget (Contract Value). Confirmation note + a one-click "set media to 57%" helper.
-                      const _nonTv = !["PTV","DRT","VRT","PVRT","CTV","OTT","OTTD"].includes(f.platform);
-                      const feeNote = _nonTv ? (
-                        <div style={{fontSize:10,color:_lm?"#527a75":"#bfe3da",marginTop:5,lineHeight:1.5,display:"flex",alignItems:"center",gap:7,flexWrap:"wrap"}}>
-                          <span>📌 Non-TVsci standard: <b style={{color:_lm?"#024744":"#00e19e"}}>43% management fee</b> — media = 57% of the overall budget.</span>
-                          {cv>0 && Math.abs(media - cv*0.57) > 1 && <button type="button" onClick={()=>set("budget",(cv*0.57).toFixed(2))}
-                            style={{background:_lm?"#dcfce7":"#002e24",border:"1px solid #00c896",borderRadius:5,padding:"2px 8px",color:_lm?"#024744":"#00e5a0",fontSize:10,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>⚡ Set media to 57% (${(cv*0.57).toLocaleString("en-US",{maximumFractionDigits:0})})</button>}
+                      // Default management fee from Config (% of spend) — applies to this line when no fee /
+                      // Contract Value is entered here, so it still books revenue. A typed fee overrides it.
+                      const dpct = (typeof defaultFeePct==="function" ? defaultFeePct() : 0);
+                      const defFee = (media>0 && dpct>0) ? media*dpct/100 : 0;
+                      const feeNote = dpct>0 ? (
+                        <div style={{fontSize:10,color:_lm?"#527a75":"#bfe3da",marginTop:5,lineHeight:1.5}}>
+                          📌 Default <b style={{color:_lm?"#024744":"#00e19e"}}>{dpct}% of spend</b> (Config) applies when no fee is set here.
                         </div>
                       ) : null;
-                      if(!(cv>0&&media>0)) return <div style={{marginTop:4}}><div style={{fontSize:10,color:_lm?"#97bab6":"#8fbfb6"}}>Enter Media Spend (above) + Contract Value (💰) to preview the fee</div>{feeNote}</div>;
+                      if(!(cv>0&&media>0)) return <div style={{marginTop:4}}>
+                        {defFee>0
+                          ? <div style={{fontSize:11,color:_lm?"#024744":"#00e19e",fontWeight:700}}>Fee ${defFee.toLocaleString("en-US",{maximumFractionDigits:0})} = ${media.toLocaleString("en-US",{maximumFractionDigits:0})} spend × {dpct}% <span style={{fontWeight:400,color:_lm?"#527a75":"#bfe3da"}}>(Config default — type a fee above or a Contract Value to override)</span></div>
+                          : <div style={{fontSize:10,color:_lm?"#97bab6":"#8fbfb6"}}>Enter Media Spend (above) + a management fee (type it, or a Contract Value) to book revenue{dpct<=0?" — or set a default fee % in Config → General":""}</div>}
+                      </div>;
                       return <div style={{fontSize:11,color:_lm?"#024744":"#00e19e",fontWeight:700,marginTop:5}}>
                         Fee ${fee.toLocaleString("en-US",{maximumFractionDigits:0})} = ${cv.toLocaleString("en-US",{maximumFractionDigits:0})} contract − ${media.toLocaleString("en-US",{maximumFractionDigits:0})} media
                         <div style={{fontWeight:400,color:_lm?"#527a75":"#bfe3da",marginTop:2,lineHeight:1.5}}>Spread across the flight = your revenue (profit). If in-platform spend goes over ${media.toLocaleString("en-US",{maximumFractionDigits:0})}, the fee drops $1 for every $1 over — same as SEM.</div>
@@ -14269,6 +14276,15 @@ function semFeeMap(c) {
 // months (same weighting as the SEM fee). CRUCIAL: if we OVERSPEND the media budget, the overage is docked
 // from the fee (profit) — same flight-cumulative overage SEM uses (see semOverageForMonth / spendForMonth).
 // Delivery still tracks for pacing (spend vs the media budget); revenue is decoupled from delivery.
+// Config default management fee — a flat % of SPEND (Austin: Ambio works on spend + a mgmt fee). Read from
+// CONFIG_KEY.defaultFeePct and lightly cached (re-parsed only when the stored config string changes) so
+// feeTotal can call it per campaign/month without re-parsing JSON every time.
+let _feeCfgRaw = null, _feePctCached = 0;
+function defaultFeePct() {
+  let raw = ""; try { raw = localStorage.getItem(CONFIG_KEY) || ""; } catch {}
+  if (raw !== _feeCfgRaw) { _feeCfgRaw = raw; let v = 0; try { v = parseFloat(JSON.parse(raw || "{}").defaultFeePct) || 0; } catch {} _feePctCached = v; }
+  return _feePctCached;
+}
 function feeTotal(c) {
   const budget = parseFloat(c && c.budget) || 0;         // media spend budget (client's pass-through)
   const cv     = parseFloat(c && c.contractValue) || 0;  // total the client pays
@@ -14276,7 +14292,11 @@ function feeTotal(c) {
   if (cv > 0) return Math.max(0, cv - budget);
   // Legacy: fee entered as a % of the media budget (budget × feePct).
   const pct = parseFloat(c && c.feePct) || 0;
-  return (budget > 0 && pct > 0) ? budget * pct / 100 : 0;
+  if (budget > 0 && pct > 0) return budget * pct / 100;
+  // Fallback: the Config default management fee (% of spend), so a campaign with only spend entered still
+  // books revenue (= spend × default %). A per-campaign Contract Value / feePct above always overrides this.
+  const dpct = defaultFeePct();
+  return (budget > 0 && dpct > 0) ? budget * dpct / 100 : 0;
 }
 // The contract total for a fee campaign — the explicit Contract Value, else derived as media budget + fee
 // (so legacy budget+feePct campaigns still show a sensible total). Used by the form + Revenue displays.
@@ -22967,6 +22987,30 @@ function PlatformConfig({ campaigns=[], metaSyncStatus=null, metaSyncInfo=null, 
         </div>
       </div>
       )}
+
+      {/* Default management fee — a flat % of SPEND applied to any FEE campaign with no explicit Contract
+          Value, so the Revenue tab books a management fee for the whole book even when only spend is entered.
+          A per-campaign Contract Value / fee always overrides it. Ambio works on spend + a mgmt fee. */}
+      <div style={{background:_lm?"#eaf5f1":"#0a1e1b",border:`1px solid ${_lm?"#c4e0d8":"#182f2c"}`,borderRadius:10,padding:"14px 18px",marginBottom:16,boxShadow:_lm?"0 1px 3px rgba(0,0,0,0.06)":"none",display:"flex",alignItems:"flex-start",gap:18,flexWrap:"wrap"}}>
+        <div style={{flex:"1 1 260px",minWidth:240}}>
+          <div style={{fontSize:12,fontWeight:700,color:_lm?"#0f172a":"#f4f8f7",marginBottom:4,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+            🧾 Default Management Fee
+            <span style={{fontSize:10,color:_lm?"#97bab6":"#8fbfb6",fontWeight:400}}>your standard Ambio rate — % of media spend</span>
+          </div>
+          <div style={{fontSize:10.5,color:_lm?"#97bab6":"#8fbfb6",lineHeight:1.55}}>Revenue = <b>management fee</b>. For any FEE campaign that has spend but no Contract Value, the fee books as <b>spend × this %</b> (e.g. 40 → a $10k-spend line earns $4k). Set a Contract Value or fee on an individual campaign to override it there. Leave blank/0 to book nothing until each fee is entered.</div>
+        </div>
+        <div style={{flexShrink:0}}>
+          <label style={labelS}>Fee % of spend</label>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <input type="number" min="0" step="1" value={getVal("defaultFeePct","")} onChange={e=>setVal("defaultFeePct", e.target.value)} placeholder="0"
+              style={{width:72,background:_lm?"#e8f4ef":"#122b28",border:`1px solid ${parseFloat(getVal("defaultFeePct",""))>0?(_lm?"#00c896":"#00c89660"):(_lm?"#c4e0d8":"#274642")}`,borderRadius:6,padding:"7px 10px",color:_lm?"#0f172a":"#e3edec",fontSize:13,outline:"none",fontFamily:"inherit",textAlign:"right"}}/>
+            <span style={{fontSize:13,fontWeight:700,color:_lm?"#527a75":"#d1ece5"}}>%</span>
+            {parseFloat(getVal("defaultFeePct",""))>0
+              ? <button onClick={()=>setVal("defaultFeePct","")} title="Clear the default fee" style={{background:_lm?"#e2f0ea":"#122b28",border:`1px solid ${_lm?"#c4e0d8":"#274642"}`,borderRadius:6,padding:"6px 11px",color:_lm?"#527a75":"#d1ece5",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>↺ Clear</button>
+              : <span style={{fontSize:10,fontWeight:700,color:_lm?"#b45309":"#fbbf24",whiteSpace:"nowrap"}}>Not set</span>}
+          </div>
+        </div>
+      </div>
 
       {/* (Removed the "Madhive Estimated Cost" card — Madhive cost is no longer a fixed per-tracker
           estimate. Each Madhive campaign's cost is modeled from its REAL reported CPM (from the Quick
