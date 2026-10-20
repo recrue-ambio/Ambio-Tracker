@@ -883,6 +883,26 @@ function tvsciAutoApplyUpdates(csv, savedMappings){
   return byCamp;
 }
 
+// Live Ambio spend-report lines that AREN'T mapped to a tracker campaign yet — these spend in the sheet but
+// show $0 in pacing until someone maps them once. Same Ambio-active filter as the apply branch; a mapped
+// line (saved in check-in memory) is skipped. Drives the "unmapped campaigns" banner so new/renamed lines
+// don't silently sit at $0. Returns [{name, account, spend}] sorted by spend desc.
+function tvsciUnmappedWithSpend(csv, savedMappings){
+  const num = v => parseFloat(String(v==null?"":v).replace(/[$,\s]/g,""))||0;
+  const out=[];
+  parseCsvRows(csv).forEach(row=>{
+    const status = String(row["Campaign Status"]||"").trim().toUpperCase();
+    const acct   = String(row["Ad Account Name"]||"").trim();
+    if(status!=="ACTIVE" || !/^ambio[_\s-]/i.test(acct)) return;          // this side's live book only
+    const name = (row["Campaign Name"]||"").trim();
+    if(!name || num(row["Lifetime Spend"])<=0) return;                     // only lines actually spending
+    const entry = savedMappings && savedMappings[`TVsci Spend||${name.toLowerCase()}`];
+    if(entry && entry.campId) return;                                      // already mapped → not a problem
+    out.push({ name, account:acct.replace(/^ambio[_\s-]+/i,""), spend:num(row["Lifetime Spend"]) });
+  });
+  return out.sort((a,b)=>b.spend-a.spend);
+}
+
 // ── Ambio campaign-name matching ── The TVsci sheet and the tracker label the SAME tactic differently
 // (sheet "UMass Amherst - Video RT" ↔ tracker "UMass Amherst - RT (TVSci Video)"). Normalize each name to
 // a (client, tactic-token) pair so a sync can match on client + tactic even when the wording differs.
@@ -9624,7 +9644,7 @@ function quietAdsForReport(cr) {
 }
 
 // ─── Pacing Dashboard ─────────────────────────────────────────────────────
-function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=()=>{}, lightMode=false, onEdit=()=>{}, onClearMetrics=()=>{}, onActivate=()=>{}, onSetStatus=()=>{}, onReassignLine=()=>{}, onClearLine=()=>{}, quickCheckIn=false, onToggleQuickCheckIn=()=>{}, quickCheckInPanel=null, monthResetAvailable=false, onCloseMonth=()=>{}, focusRequest=null }) {
+function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=()=>{}, lightMode=false, onEdit=()=>{}, onClearMetrics=()=>{}, onActivate=()=>{}, onSetStatus=()=>{}, onReassignLine=()=>{}, onClearLine=()=>{}, quickCheckIn=false, onToggleQuickCheckIn=()=>{}, quickCheckInPanel=null, monthResetAvailable=false, onCloseMonth=()=>{}, focusRequest=null, unmappedSpend=[], onMapUnmapped=()=>{} }) {
   // ── Reassign-line modal state ──
   // When the user clicks the ↪ icon on a breakdown line, we open a search modal
   // that lets them move that line's data to a different campaign without redoing QCI.
@@ -9764,6 +9784,9 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   // background auto-sync fires, and on mount from the cached stamp.
   const [tvsciLastSync, setTvsciLastSync] = useState(()=>{ try{ return localStorage.getItem("tvsci-last-sync")||""; }catch{ return ""; } });
   useEffect(()=>{ const onAuto=e=>{ if(e?.detail?.at) setTvsciLastSync(e.detail.at); }; window.addEventListener("tvsci-autosync", onAuto); return ()=>window.removeEventListener("tvsci-autosync", onAuto); }, []);
+  // Dismiss state for the unmapped-spend banner — keyed by the set of unmapped names so dismissing hides it
+  // until a NEW unmapped line shows up (then it returns on its own).
+  const [unmappedDismissed, setUnmappedDismissed] = useState("");
   // ── Daily Digest view (the TVsci-emailed .xlsx QA report), a read-only Pacing sub-view ──
   const DIGEST_KEY = "ambio-daily-digest";
   const [digest,       setDigest]       = useState(()=>{ try{ const s=localStorage.getItem(DIGEST_KEY); return s?JSON.parse(s):null; }catch{ return null; } });
@@ -12676,6 +12699,36 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     {/* Un-closed-month notice — pacing stays anchored to last month until you close it (see
         pacingNow); this explains that and offers one-click close. */}
     {monthResetAvailable && <MonthNotClosedBanner status={monthCloseStatus()} onCloseMonth={onCloseMonth}/>}
+
+    {/* Unmapped-spend banner — campaigns are spending in the Ambio Spend Report but aren't mapped to a line
+        yet, so their pacing reads $0. Prompt to map them (opens Quick Check-in with the report staged +
+        auto-matched). Dismissible, keyed to the current set so a NEW unmapped line brings it back. */}
+    {(()=>{
+      const u = Array.isArray(unmappedSpend) ? unmappedSpend : [];
+      if(!u.length) return null;
+      const sig = u.map(x=>x.name).sort().join("|");
+      if(sig===unmappedDismissed) return null;
+      const amber = lightMode?"#b45309":"#fcd34d";
+      const tip = u.slice(0,20).map(x=>`• ${x.account} — $${Math.round(x.spend).toLocaleString()}`).join("\n")+(u.length>20?`\n…and ${u.length-20} more`:"");
+      return (
+        <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:12,
+          background:lightMode?"#fffbeb":"#1f1603",border:`1px solid ${lightMode?"#fcd34d":"#7a5c12"}`,
+          borderRadius:9,padding:"9px 13px"}}>
+          <span style={{fontSize:15}}>💸</span>
+          <span title={tip} style={{fontSize:12.5,color:amber,fontWeight:600,flex:1,minWidth:200,cursor:"default"}}>
+            <b>{u.length}</b> {u.length===1?"campaign is":"campaigns are"} spending in the Ambio Spend Report but {u.length===1?"isn't":"aren't"} mapped to a line yet — their pacing shows <b>$0</b>. Map {u.length===1?"it":"them"} so the spend flows.
+          </span>
+          <button onClick={onMapUnmapped}
+            style={{fontSize:12,fontWeight:700,borderRadius:7,padding:"6px 14px",cursor:"pointer",whiteSpace:"nowrap",
+              background:lightMode?"#d97706":"#3a2a06",border:`1px solid ${lightMode?"#d97706":"#d9a441"}`,
+              color:lightMode?"#fff":"#ffd97a"}}>
+            🔗 Map {u.length===1?"it":"them"}
+          </button>
+          <button onClick={()=>setUnmappedDismissed(sig)} title="Dismiss until a new unmapped line appears"
+            style={{background:"none",border:"none",color:amber,fontSize:16,lineHeight:1,cursor:"pointer",padding:"0 2px"}}>×</button>
+        </div>
+      );
+    })()}
 
     {/* View switch (This Month / ✈ Flights). Quick Check-in moved down into the filter toolbar next to
         Overlays (the user) — see below. */}
@@ -18213,18 +18266,33 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
         const rawName = getCampName(row, source);
         const sClient = ambioClient(rawName);
         const sTactic = ambioTactic(rawName);
-        if(sClient){
-          let bestId="", bestScore=0, tied=false;
+        // The Ad Account Name is the FULL client ("Ambio_Rochester Institute of Technology") even when the
+        // Campaign Name is an abbreviation/alias ("RIT (National Campaign)") or carries an "(F26)" tag that
+        // tanks the fuzzy score. Use it as a FALLBACK client — but only when the campaign-name match came back
+        // weak, so multi-flight accounts (one Ad Account → University of Iowa Geofence/Tippie/RT/Juniors/…)
+        // still disambiguate by their sub-account token from the CAMPAIGN name instead of all tying on the
+        // shared Ad Account. The result is a pre-fill suggestion the review gate still vets before Apply.
+        const sAccount = ambioClient(String(row["Ad Account Name"]||"").replace(/^ambio[_\s\-]+/i,""));
+        const scorePass = (sc)=>{
+          let bId="", bSc=0, ti=false;
           assignPool.forEach(c=>{
             const cTactic = ambioTactic(c.campaignName);
-            if(sTactic && cTactic && sTactic !== cTactic) return;                 // tactics known and disagree → skip
-            let score = fuzzyScore(sClient, ambioClient(c.campaignName));
+            if(sTactic && cTactic && sTactic !== cTactic) return;               // tactics known and disagree → skip
+            let score = fuzzyScore(sc, ambioClient(c.campaignName));
             if(score < 0.55) return;
             if(sTactic && cTactic && sTactic === cTactic) score = Math.min(1, score + 0.12);  // reward a tactic match
-            if(score > bestScore){ bestScore=score; bestId=String(c.id); tied=false; }
-            else if(score===bestScore && String(c.id)!==bestId){ tied=true; }
+            if(score > bSc){ bSc=score; bId=String(c.id); ti=false; }
+            else if(score===bSc && String(c.id)!==bId){ ti=true; }
           });
-          if(bestId){ initMap[i]=bestId; initConf[i]= tied ? 0.5 : Math.min(1, bestScore); autoCount++; }
+          return {bId,bSc,ti};
+        };
+        if(sClient){
+          let r = scorePass(sClient);
+          if(r.bSc < 0.6 && sAccount && sAccount!==sClient){   // weak name match → retry with the full Ad-Account client
+            const r2 = scorePass(sAccount);
+            if(r2.bSc > r.bSc) r = r2;
+          }
+          if(r.bId){ initMap[i]=r.bId; initConf[i]= r.ti ? 0.5 : Math.min(1, r.bSc); autoCount++; }
         }
       } else if(source==="Google"){
         // Route this row to its own tactic FIRST: a YouTube/Video row → the client's YT campaign, a
@@ -24846,6 +24914,30 @@ export default function App() {
     try { apply(localStorage.getItem("tvsci-cached-csv")||"", localStorage.getItem("tvsci-last-sync")||""); } catch {}
     return () => window.removeEventListener("tvsci-autosync", onAuto);
   }, []);
+  // ── Unmapped-spend watch ── Recompute which live Ambio spend-report lines aren't mapped to a campaign yet,
+  // so the Pacing banner can prompt the user to map them (they'd otherwise sit silently at $0). Reruns on a
+  // fresh sync AND whenever campaigns change (an Apply writes spend + a saved mapping, shrinking the set).
+  useEffect(() => {
+    const recompute = (csvIn) => {
+      let csv = csvIn; if(!csv){ try{ csv = localStorage.getItem("tvsci-cached-csv")||""; }catch{ csv=""; } }
+      if(!csv){ setTvsciUnmapped([]); return; }
+      let sm={}; try{ sm = JSON.parse(localStorage.getItem(CSV_MAPPINGS_KEY)||"{}"); }catch{}
+      try{ setTvsciUnmapped(tvsciUnmappedWithSpend(csv, sm)); }catch{ setTvsciUnmapped([]); }
+    };
+    const onAuto = e => recompute(e?.detail?.csv);
+    window.addEventListener("tvsci-autosync", onAuto);
+    recompute();
+    return () => window.removeEventListener("tvsci-autosync", onAuto);
+  }, [campaigns]);
+  // "Map them" (unmapped-spend banner): load the cached TVsci spend report into Quick Check-in so its rows
+  // stage with the improved client+tactic auto-match pre-filled — the user reviews the ⚠ ones and Applies,
+  // which maps + remembers them (future syncs then auto-apply). An explicit action, so it doesn't bring back
+  // the auto-stage-on-open we removed.
+  const mapUnmappedSpend = React.useCallback(() => {
+    let csv=""; try{ csv = localStorage.getItem("tvsci-cached-csv")||""; }catch{}
+    if(csv) setTvsciMapFile(new File([csv], "TVsci Ambio Spend Report.csv", { type:"text/csv" }));
+    setActiveTab("pacing"); setQuickCheckIn(true);
+  }, []);
   // ONE month-end P&L projection for the WHOLE app — the Revenue-tab chart AND the Home "on pace for" tile
   // both read THIS same value, so their projected-profit numbers can't disagree (the user hit repeated
   // mismatches from two independently-computed estimates). Piped down to both as the `monthPnl` prop.
@@ -24895,6 +24987,12 @@ export default function App() {
   const [inboxStatus, setInboxStatus] = useState({ checking:false, lastChecked:null, error:null, newIO:0 });
   const [pendingCheckins, setPendingCheckins] = useState([]);        // staged check-in manifest items awaiting review
   const [pendingCheckinFile, setPendingCheckinFile] = useState(null);// a fetched check-in File auto-loaded into the QCI panel
+  // A File built from the cached TVsci spend CSV, auto-loaded into the QCI panel when the user clicks "Map
+  // them" on the unmapped-campaigns banner (separate from the email-inbox pendingCheckinFile so consuming
+  // one doesn't disturb the other's queue).
+  const [tvsciMapFile, setTvsciMapFile] = useState(null);
+  // Live Ambio spend-report lines not mapped to a campaign yet (spending in the sheet, $0 in pacing).
+  const [tvsciUnmapped, setTvsciUnmapped] = useState([]);
   const inboxSeenRef = useRef(loadInboxSeen());
   const saveInboxCfgAnd = (patch) => { setInboxCfg(prev => { const next = {...prev, ...patch}; saveInboxCfg(next); return next; }); };
 
@@ -27233,7 +27331,8 @@ export default function App() {
             monthResetAvailable={monthResetAvailable} onCloseMonth={()=>setShowMonthReset(true)}
             quickCheckIn={quickCheckIn}
             onToggleQuickCheckIn={()=>setQuickCheckIn(v=>!v)}
-            quickCheckInPanel={quickCheckIn ? <QuickCheckInPanel campaigns={campaigns} archive={archive} setArchive={setArchive} filtered={filtered} setCampaigns={setCampaigns} onClose={()=>setQuickCheckIn(false)} autoLoadFile={pendingCheckinFile} onAutoLoadConsumed={consumePendingCheckin}/> : null}
+            unmappedSpend={tvsciUnmapped} onMapUnmapped={mapUnmappedSpend}
+            quickCheckInPanel={quickCheckIn ? <QuickCheckInPanel campaigns={campaigns} archive={archive} setArchive={setArchive} filtered={filtered} setCampaigns={setCampaigns} onClose={()=>{setQuickCheckIn(false);setTvsciMapFile(null);}} autoLoadFile={pendingCheckinFile || tvsciMapFile} onAutoLoadConsumed={()=>{ if(tvsciMapFile) setTvsciMapFile(null); else consumePendingCheckin(); }}/> : null}
             onActivate={(id)=>setCampaigns(cs=>cs.map(c=>c.id===id?{...c,status:"active"}:c))}
             onSetStatus={(id, status) => {
               // Pausing/activating moves the campaign between pacing sections (active list ↔ "off" list),
