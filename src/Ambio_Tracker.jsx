@@ -20535,6 +20535,10 @@ function RevenueDashboard({ campaigns=[], monthPnl=null, onEdit=()=>{}, onLock=(
   // bill CPM and need only a rate; YT needs an explicit dealType (CPV vs CPM); SEM uses the contract path.
   const withContract = campaigns.filter(c =>
     parseFloat(c.contractValue) > 0 ||
+    // FEE campaigns book a management fee — include any with a fee, whether from an explicit Contract Value,
+    // a feePct, OR the Config default % of spend (feeTotal covers all three). Without this a spend-only FEE
+    // book showed revenue in the chart but an empty breakdown + "no contract values yet" empty-state.
+    (dealBasis(c) === "FEE" && feeTotal(c) > 0) ||
     (parseFloat(c.contractRate) > 0 && c.platform !== "SEM" && true /* YT defaults to CPV, no explicit dealType required */) ||
     (c.platform === "SEM" && Object.keys(semFeeMap(c)).length > 0)
   );
@@ -22049,7 +22053,7 @@ function RevenueDashboard({ campaigns=[], monthPnl=null, onEdit=()=>{}, onLock=(
                         const actual = activeMonth===thisMonth
                           ? (feeCurrentMonthSpend(r.c) ?? 0)   // sync-aware media spend (matches the overage math)
                           : (closedMonthMetrics(r.c, activeMonth)?.spend ?? 0);
-                        if(!(parseFloat(r.c.contractValue)>0 || parseFloat(r.c.feePct)>0)) return strip(chip("⚠ Set Contract Value — fee = contract − media spend","#f59e0b"));
+                        if(feeTotal(r.c) <= 0) return strip(chip("⚠ No fee — set a Contract Value or a default fee % (Config)","#f59e0b"));
                         if(fee<=0 && r.focusCell.profit==null && !budget) return null;
                         return strip(<>
                           <span>Fee <b style={{color:_lm?"#024744":"#00e5a0"}}>{$fc(fee)}</b> <span style={{color:muted}}>= contract − media = your revenue</span></span>
