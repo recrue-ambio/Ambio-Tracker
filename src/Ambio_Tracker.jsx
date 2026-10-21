@@ -14279,10 +14279,19 @@ function semFeeMap(c) {
 // Config default management fee — a flat % of SPEND (Austin: Ambio works on spend + a mgmt fee). Read from
 // CONFIG_KEY.defaultFeePct and lightly cached (re-parsed only when the stored config string changes) so
 // feeTotal can call it per campaign/month without re-parsing JSON every time.
-let _feeCfgRaw = null, _feePctCached = 0;
+// Org default = 43% of spend (Austin's standard Ambio management fee). Applies whenever Config leaves the
+// field BLANK, so a fresh tracker (Adam's, a new CM's) books the fee out of the box. An explicit Config
+// value wins — including 0, which turns the default fee OFF.
+const DEFAULT_FEE_PCT = 43;
+let _feeCfgRaw = null, _feePctCached = DEFAULT_FEE_PCT;
 function defaultFeePct() {
   let raw = ""; try { raw = localStorage.getItem(CONFIG_KEY) || ""; } catch {}
-  if (raw !== _feeCfgRaw) { _feeCfgRaw = raw; let v = 0; try { v = parseFloat(JSON.parse(raw || "{}").defaultFeePct) || 0; } catch {} _feePctCached = v; }
+  if (raw !== _feeCfgRaw) {
+    _feeCfgRaw = raw;
+    let v = DEFAULT_FEE_PCT;
+    try { const s = JSON.parse(raw || "{}").defaultFeePct; if (s !== undefined && String(s).trim() !== "" && !isNaN(parseFloat(s))) v = parseFloat(s) || 0; } catch {}
+    _feePctCached = v;
+  }
   return _feePctCached;
 }
 function feeTotal(c) {
@@ -23001,17 +23010,17 @@ function PlatformConfig({ campaigns=[], metaSyncStatus=null, metaSyncInfo=null, 
             🧾 Default Management Fee
             <span style={{fontSize:10,color:_lm?"#97bab6":"#8fbfb6",fontWeight:400}}>your standard Ambio rate — % of media spend</span>
           </div>
-          <div style={{fontSize:10.5,color:_lm?"#97bab6":"#8fbfb6",lineHeight:1.55}}>Revenue = <b>management fee</b>. For any FEE campaign that has spend but no Contract Value, the fee books as <b>spend × this %</b> (e.g. 40 → a $10k-spend line earns $4k). Set a Contract Value or fee on an individual campaign to override it there. Leave blank/0 to book nothing until each fee is entered.</div>
+          <div style={{fontSize:10.5,color:_lm?"#97bab6":"#8fbfb6",lineHeight:1.55}}>Revenue = <b>management fee</b>. For any FEE campaign that has spend but no Contract Value, the fee books as <b>spend × this %</b> (e.g. 43 → a $10k-spend line earns $4,300). Set a Contract Value or fee on an individual campaign to override it there. <b>Leave blank to use the 43% default</b>; enter <b>0</b> to turn the default fee off.</div>
         </div>
         <div style={{flexShrink:0}}>
           <label style={labelS}>Fee % of spend</label>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
-            <input type="number" min="0" step="1" value={getVal("defaultFeePct","")} onChange={e=>setVal("defaultFeePct", e.target.value)} placeholder="0"
-              style={{width:72,background:_lm?"#e8f4ef":"#122b28",border:`1px solid ${parseFloat(getVal("defaultFeePct",""))>0?(_lm?"#00c896":"#00c89660"):(_lm?"#c4e0d8":"#274642")}`,borderRadius:6,padding:"7px 10px",color:_lm?"#0f172a":"#e3edec",fontSize:13,outline:"none",fontFamily:"inherit",textAlign:"right"}}/>
+            <input type="number" min="0" step="1" value={getVal("defaultFeePct","")} onChange={e=>setVal("defaultFeePct", e.target.value)} placeholder="43"
+              style={{width:72,background:_lm?"#e8f4ef":"#122b28",border:`1px solid ${String(getVal("defaultFeePct","")).trim()!==""?(_lm?"#00c896":"#00c89660"):(_lm?"#c4e0d8":"#274642")}`,borderRadius:6,padding:"7px 10px",color:_lm?"#0f172a":"#e3edec",fontSize:13,outline:"none",fontFamily:"inherit",textAlign:"right"}}/>
             <span style={{fontSize:13,fontWeight:700,color:_lm?"#527a75":"#d1ece5"}}>%</span>
-            {parseFloat(getVal("defaultFeePct",""))>0
-              ? <button onClick={()=>setVal("defaultFeePct","")} title="Clear the default fee" style={{background:_lm?"#e2f0ea":"#122b28",border:`1px solid ${_lm?"#c4e0d8":"#274642"}`,borderRadius:6,padding:"6px 11px",color:_lm?"#527a75":"#d1ece5",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>↺ Clear</button>
-              : <span style={{fontSize:10,fontWeight:700,color:_lm?"#b45309":"#fbbf24",whiteSpace:"nowrap"}}>Not set</span>}
+            {String(getVal("defaultFeePct","")).trim()!==""
+              ? <button onClick={()=>setVal("defaultFeePct","")} title="Clear your override and use the 43% default" style={{background:_lm?"#e2f0ea":"#122b28",border:`1px solid ${_lm?"#c4e0d8":"#274642"}`,borderRadius:6,padding:"6px 11px",color:_lm?"#527a75":"#d1ece5",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>↺ Use 43%</button>
+              : <span style={{fontSize:10,fontWeight:700,color:_lm?"#024744":"#00a884",whiteSpace:"nowrap"}}>Default 43% ✓</span>}
           </div>
         </div>
       </div>
