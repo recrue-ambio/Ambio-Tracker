@@ -26501,6 +26501,7 @@ export default function App() {
       monthlyBackups: _read(MONTHLY_BACKUP_KEY),
       monthResetKey:  (()=>{ try { return localStorage.getItem(MONTH_RESET_KEY); } catch { return null; } })(),
       settings,       // NEW (v4): partner codes, custom platforms, QCI mappings, benchmarks, time zone
+      tracker: "Ambio",   // which tracker this backup is from (vs Zeus) — labels the file so a JSON isn't mixed up
       exportDate: new Date().toISOString(),
       exportVersion: 4,
     };
@@ -26508,7 +26509,7 @@ export default function App() {
 
   const doExport = () => {
     try {
-      downloadBackupFile(`campaign-tracker-${today}.json`, JSON.stringify(buildBackupPayload(), null, 2));
+      downloadBackupFile(`ambio-tracker-${today}.json`, JSON.stringify(buildBackupPayload(), null, 2));
       localStorage.setItem(EXPORT_KEY,Date.now().toString());
       // A manual JSON export IS a full backup — record it as today's backup too, so the auto-backup
       // daily trigger (which keys off lastBackupDate) doesn't re-nudge the banner on the next refresh.
@@ -26551,7 +26552,7 @@ export default function App() {
     try {
       const stamp = getToday();
       const jsonStr = JSON.stringify(buildBackupPayload(), null, 2);
-      const filename = `campaign-tracker-${stamp}.json`;
+      const filename = `ambio-tracker-${stamp}.json`;
       // ALWAYS write the durable IndexedDB safety copy first — independent of whether the folder/download
       // write succeeds. This is the copy the load-time auto-recovery reads if localStorage ever gets wiped.
       idbSaveSnapshot(jsonStr);
