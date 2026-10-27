@@ -414,9 +414,11 @@ function severePacing(pacing){
 // Trouble REASON taxonomy — drives the "filter by issue" chips under the Pacing Trouble button. Each
 // troubled campaign carries one or more of these keys (see troubleReasonsFor in PacingDashboard). Order =
 // display order; label = chip text; color = chip accent (matches the KPI conventions used elsewhere).
-const TROUBLE_REASON_ORDER  = ["pace","capped","ctr","cpm","vcr","goalhit","freq","rate","dark"];
-const TROUBLE_REASON_LABEL  = { pace:"Pacing", capped:"Capped", ctr:"CTR", cpm:"CPM", vcr:"Completion", goalhit:"Hit goal early", freq:"Frequency", rate:"No rate", dark:"Went dark" };
-const TROUBLE_REASON_COLOR  = { pace:"#ef4444", capped:"#ef4444", ctr:"#f59e0b", cpm:"#f97316", vcr:"#a855f7", goalhit:"#00d48a", freq:"#eab308", rate:"#ef4444", dark:"#ef4444" };
+// Ambio-first (spend + management fee): the spend-model signals lead, the delivery-quality ones (ctr/cpm/vcr/
+// freq/rate) trail. pausespend/overspend/endsoon/nostart/stale key off the TVsci spend sync + media budget.
+const TROUBLE_REASON_ORDER  = ["pausespend","overspend","pace","capped","endsoon","nostart","stale","ctr","cpm","vcr","goalhit","freq","rate","dark"];
+const TROUBLE_REASON_LABEL  = { pausespend:"Paused but spending", overspend:"Over budget", endsoon:"Ending soon", nostart:"Not spending", stale:"Stale spend", pace:"Pacing", capped:"Capped", ctr:"CTR", cpm:"CPM", vcr:"Completion", goalhit:"Hit goal early", freq:"Frequency", rate:"No rate", dark:"Went dark" };
+const TROUBLE_REASON_COLOR  = { pausespend:"#ef4444", overspend:"#ef4444", endsoon:"#f97316", nostart:"#f59e0b", stale:"#eab308", pace:"#ef4444", capped:"#ef4444", ctr:"#f59e0b", cpm:"#f97316", vcr:"#a855f7", goalhit:"#00d48a", freq:"#eab308", rate:"#ef4444", dark:"#ef4444" };
 function loadCustomPlatforms() { try{const s=localStorage.getItem(CUSTOM_PLATFORMS_KEY);return s?JSON.parse(s):{platforms:[],colors:{}}}catch{return{platforms:[],colors:{}}}}
 function saveCustomPlatforms(d){try{localStorage.setItem(CUSTOM_PLATFORMS_KEY,JSON.stringify(d))}catch(e){}}
 // ALL_PLATFORMS stays as a live array that includes custom additions
@@ -10166,6 +10168,33 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       cpm: (disp && disp.cpm) || c.cpm,
       completionRate: (disp && disp.completionRate) || c.completionRate,
       impressions: (disp && disp.impressions) || c.impressions };
+    // ── Ambio spend-model signals (key off the TVsci spend sync + the media budget) ────────────────
+    const _spendPaced = pacingMetricFor(c.platform, c.dealType) === "spend";
+    const _delivered  = parseFloat(c.tvsciLifetimeSpend) || 0;
+    const _budget     = parseFloat(c.budget) || 0;
+    const _yest       = parseFloat(c.tvsciYesterdaySpend) || 0;
+    const _tday       = parseFloat(c.tvsciTodaySpend) || 0;
+    const _today      = getToday();
+    const _started    = !c.startDate || c.startDate.slice(0,10) <= _today;
+    const _endedF     = c.endDate && c.endDate.slice(0,10) < _today;
+    const _dr         = daysRemaining(c);   // null = no end date · <0 = ended
+    // Paused but spending — set to Off/Paused in the tracker yet still burning in the platform (sync shows
+    // yesterday/today spend). Austin's flag: you think it's off but it's eating budget.
+    if((c.status==="off" || c.status==="paused") && (_yest > 0 || _tday > 0)) out.push("pausespend");
+    // Over budget — lifetime spend has passed the media budget → the overage docks your management fee.
+    if(_spendPaced && _budget > 0 && _delivered > _budget*1.01 && !_endedF) out.push("overspend");
+    // Ending soon with budget left — flight ends within 5 days but under 85% of the budget has delivered.
+    if(_spendPaced && _budget > 0 && _dr !== null && _dr >= 0 && _dr <= 5 && _delivered < _budget*0.85) out.push("endsoon");
+    // Not spending — active, started 3+ days ago, but $0 lifetime spend (never launched / stalled / unmapped).
+    if(c.status==="active" && _spendPaced && _started && !_endedF && _delivered <= 0 && c.startDate){
+      const _ago = Math.round((new Date(_today) - new Date(c.startDate.slice(0,10)))/86400000);
+      if(_ago >= 3) out.push("nostart");
+    }
+    // Stale spend — synced before but not in 7+ days, so its pacing numbers are outdated.
+    { const _asof = c.tvsciSpendAsOf || c.lastSpendSync;
+      if(_spendPaced && !_endedF && _asof){ const _d = new Date(_asof);
+        if(!isNaN(_d) && Math.round((new Date(_today) - _d)/86400000) >= 7) out.push("stale"); } }
+
     const g = gradeCampaignKpis(merged, kpiBenchmarks);   // g.ctr/g.vcr/g.cpm set only at sev≥2
     if(g.ctr) out.push("ctr");
     if(g.cpm) out.push("cpm");
