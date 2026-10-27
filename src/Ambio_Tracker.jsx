@@ -171,7 +171,9 @@ const MODELED_COST_PLATFORMS = ["DSP", "GCTV", "PCTV", "AECTV"];
 // Read the per-platform estimated cost CPMs (DSP + Madhive) from Config, falling back to defaults.
 // Returns a map keyed by platform; call from render so Config edits take effect immediately.
 function loadModeledCpms() {
-  let cfg = {}; try { cfg = JSON.parse(localStorage.getItem(CONFIG_KEY) || "{}"); } catch {}
+  // Guard against a corrupt config stored as the literal string "null"/"false"/an array (a bad import or
+  // restore can do this): JSON.parse("null") === null, and reading .dspEstCpm off null white-screens the app.
+  let cfg = {}; try { const p = JSON.parse(localStorage.getItem(CONFIG_KEY) || "{}"); if (p && typeof p === "object" && !Array.isArray(p)) cfg = p; } catch {}
   const dsp = parseFloat(cfg.dspEstCpm) > 0 ? parseFloat(cfg.dspEstCpm) : DSP_EST_CPM;
   const out = { DSP: dsp, ...MADHIVE_EST_CPM_DEFAULT };
   const mh = cfg.madhiveEstCpm || {};
@@ -16859,18 +16861,21 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
   const [rowOrder,     setRowOrder]     = React.useState(null);   // [origIdx, …] or null (= file order)
   function computeRowOrder(rows, mp, conf, mem){
     if(!Array.isArray(rows)) return null;
+    // Needs-attention first: the rows a human still has to deal with float to the TOP so they're never
+    // buried under a long list of already-settled matches (Austin: the unmapped ones were landing at the
+    // very bottom). Order = unmapped → fuzzy/low-confidence → settled (remembered / exact / manual).
     const tier = (i)=>{
       const a = mp[i];
-      if(!a) return 2;                                            // unmapped → last
+      if(!a) return 0;                                            // unmapped → top (nothing lands until you map it)
       const isMem = mem[i] != null && String(mem[i]) === String(a);
       const c = conf[i];
-      if(!isMem && c !== undefined && c < 1.0) return 0;          // fuzzy auto-match → top
-      return 1;                                                   // known (remembered / exact) → middle
+      if(!isMem && c !== undefined && c < 1.0) return 1;          // fuzzy auto-match → just below unmapped
+      return 2;                                                   // settled (remembered / exact / manual pick) → bottom
     };
     return rows.map((_,i)=>i).sort((a,b)=>{
       const ta=tier(a), tb=tier(b);
       if(ta!==tb) return ta-tb;
-      if(ta===0){ const ca=conf[a]??1, cb=conf[b]??1; if(ca!==cb) return ca-cb; } // lowest % first
+      if(ta===1){ const ca=conf[a]??1, cb=conf[b]??1; if(ca!==cb) return ca-cb; } // weakest fuzzy match first
       return a-b;                                                 // stable: keep file order within tier
     });
   }
@@ -16941,16 +16946,18 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
   // Netflix line, which kept auto-matching). Persisted, so ignored rows are auto-skipped on every
   // future drop. Un-ignore any time from the list up top to map it again.
   const QCI_IGNORE_KEY = "qci-ignored-names";
-  const IGNORE_TTL_DAYS = 30; // auto-drop an ignored campaign that hasn't appeared in a dropped file this long
+  const IGNORE_TTL_DAYS = 30; // entries older than this are flagged 💤 dormant for display — NOT removed (kept as a permanent safety net)
   const normIgnore = s => String(s||"").trim().toLowerCase();
   // Entries are {name, addedAt, lastSeenAt} (ms). Legacy plain-string entries are migrated on load.
+  // We KEEP every entry (no stale-drop) so an ignored campaign is never silently lost — Austin wants the
+  // list as a safety net he can always restore from.
   const [ignoredNames, setIgnoredNames] = React.useState(()=>{
     try{
       const a=JSON.parse(localStorage.getItem(QCI_IGNORE_KEY)||"[]");
       if(!Array.isArray(a)) return [];
-      const now=Date.now(), cutoff=now-IGNORE_TTL_DAYS*86400000;
+      const now=Date.now();
       return a.map(e=> typeof e==="string" ? {name:e, addedAt:now, lastSeenAt:now} : e)
-              .filter(e=> e && e.name && Number(e.lastSeenAt||e.addedAt||now) >= cutoff);
+              .filter(e=> e && e.name);
     } catch{ return []; }
   });
   const _persistIgnored = (arr)=>{ try{ localStorage.setItem(QCI_IGNORE_KEY, JSON.stringify(arr)); }catch{} };
@@ -16958,22 +16965,22 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
   const addIgnore = (name)=>{ const nm=String(name||"").trim(); if(!nm) return; const now=Date.now(); setIgnoredNames(prev=>{ if(prev.some(e=>normIgnore(e.name)===normIgnore(nm))) return prev; const next=[...prev,{name:nm,addedAt:now,lastSeenAt:now}]; _persistIgnored(next); return next; }); };
   const removeIgnore = (name)=> setIgnoredNames(prev=>{ const next=prev.filter(e=>normIgnore(e.name)!==normIgnore(name)); _persistIgnored(next); return next; });
   const clearAllIgnored = ()=>{ setIgnoredNames([]); _persistIgnored([]); };
-  const [showIgnoredList, setShowIgnoredList] = React.useState(false); // collapsed by default — small dropdown
+  const [showIgnoredList, setShowIgnoredList] = React.useState(true); // open by default so the ignore list is visible on sight (Austin: "I need to be able to see the campaigns I ignored")
   const [ignoredSearch, setIgnoredSearch] = React.useState("");        // search box for the ignored list (can grow to 50+)
-  // On each file drop: refresh lastSeen for ignored names present in the file, then prune any that
-  // haven't shown up in IGNORE_TTL_DAYS days — so the ignore list self-cleans and never grows unbounded.
+  // On each file drop: refresh lastSeen for ignored names present in the file. We DON'T auto-delete stale
+  // entries — Austin wants the ignore list kept as a permanent safety net ("in case I ignore a campaign but
+  // actually need it"). Entries not seen in IGNORE_TTL_DAYS are flagged dormant for display only (💤), never
+  // removed; the search box + scroll keep a long list manageable.
   React.useEffect(()=>{
     if(!Array.isArray(fileRows) || !fileRows.length) return;
-    const now=Date.now(), cutoff=now-IGNORE_TTL_DAYS*86400000;
+    const now=Date.now();
     const present=new Set(fileRows.map(r=>normIgnore(getCampName(r, fileSource))));
     setIgnoredNames(prev=>{
       let changed=false;
       const bumped=prev.map(e=>{ if(present.has(normIgnore(e.name))){ changed=true; return {...e,lastSeenAt:now}; } return e; });
-      const pruned=bumped.filter(e=> Number(e.lastSeenAt||e.addedAt||now) >= cutoff);
-      if(pruned.length!==bumped.length) changed=true;
       if(!changed) return prev;
-      _persistIgnored(pruned);
-      return pruned;
+      _persistIgnored(bumped);
+      return bumped;
     });
   }, [fileRows, fileSource]);
   // Write the migrated/pruned shape back to storage once on mount, so localStorage matches what's
@@ -19133,9 +19140,11 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
               <div style={{display:"flex",flexWrap:"wrap",gap:6,maxHeight:170,overflowY:"auto",padding:"1px"}}>
                 {shown.map((e,idx)=>{
                   const seenDays=Math.floor((Date.now()-Number(e.lastSeenAt||e.addedAt||Date.now()))/86400000);
+                  const dormant=seenDays>=IGNORE_TTL_DAYS;   // not seen in a drop for a while — dimmed, but KEPT (never auto-removed)
                   return (
-                    <span key={idx} style={{display:"inline-flex",alignItems:"center",gap:7,background:_lm?"#f0f5f4":"#0b2522",border:`1px solid ${_lm?"#c4e0d8":"#182f2c"}`,borderRadius:6,padding:"3px 5px 3px 9px",fontSize:10.5,color:_lm?"#527a75":"#b8d0cd",maxWidth:280}}
-                      title={`${e.name} · last seen ${seenDays<=0?"today":seenDays+"d ago"} · auto-removed after ${IGNORE_TTL_DAYS}d unseen`}>
+                    <span key={idx} style={{display:"inline-flex",alignItems:"center",gap:7,background:_lm?"#f0f5f4":"#0b2522",border:`1px solid ${_lm?"#c4e0d8":"#182f2c"}`,borderRadius:6,padding:"3px 5px 3px 9px",fontSize:10.5,color:_lm?"#527a75":"#b8d0cd",maxWidth:280,opacity:dormant?0.6:1}}
+                      title={`${e.name} · last seen ${seenDays<=0?"today":seenDays+"d ago"}${dormant?" · 💤 dormant (not in a recent file) — kept so you can restore it":""}`}>
+                      {dormant&&<span style={{flexShrink:0}}>💤</span>}
                       <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.name}</span>
                       <button onClick={()=>removeIgnore(e.name)} title="Stop ignoring — map this campaign again on check-in"
                         style={{background:_lm?"#00c896":"#002e24",border:`1px solid ${_lm?"#00c896":"#00c89640"}`,borderRadius:4,color:_lm?"#eaf5f1":"#00e5a0",fontSize:9,fontWeight:700,padding:"2px 7px",cursor:"pointer",whiteSpace:"nowrap",flexShrink:0}}>↩ Map it</button>
@@ -19145,7 +19154,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
                 {shown.length===0 && <span style={{fontSize:10,color:_lm?"#97bab6":"#8fbfb6",padding:"2px 4px"}}>No ignored name matches “{ignoredSearch}”.</span>}
               </div>
               <div style={{fontSize:9,color:_lm?"#97bab6":"#8fbfb6",marginTop:6}}>
-                Auto-removed after {IGNORE_TTL_DAYS} days without appearing in a dropped file · <button onClick={clearAllIgnored} style={{background:"none",border:"none",color:_lm?"#dc2626":"#f87171",fontSize:9,fontWeight:700,cursor:"pointer",padding:0,textDecoration:"underline"}}>Clear all</button>
+                Kept permanently as a safety net — 💤 = not seen in a recent file, but still restorable · <button onClick={clearAllIgnored} style={{background:"none",border:"none",color:_lm?"#dc2626":"#f87171",fontSize:9,fontWeight:700,cursor:"pointer",padding:0,textDecoration:"underline"}}>Clear all</button>
               </div>
             </div>
             );
