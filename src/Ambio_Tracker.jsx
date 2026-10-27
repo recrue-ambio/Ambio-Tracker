@@ -17511,8 +17511,12 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
     "DSP-Internal":  new Set(["DSP"]),
     "DSP":           new Set(["DSP"]),
     "Madhive":       new Set(["PCTV","GCTV","AECTV"]), // Madhive = GCTV/PCTV + Audience Extension (AECTV); plain CTV/OTT belong to TVsci
-    "TVsci Spend":   new Set(["CTV","OTT"]),    // TVsci = the plain CTV/OTT campaigns (never Madhive's GCTV/PCTV)
-    "TVsci Daily":   new Set(["CTV","OTT","OTTD"]), // TVsci covers CTV + OTT + OTTD (its "Display" lines)
+    // Ambio runs TVsci on its own platform codes — PTV (CTV/OTT), DRT (Display RT), VRT (Video RT),
+    // PVRT (Premium Video RT) — NOT the plain CTV/OTT codes. Both are listed so platformMatchesSource
+    // accepts a REMEMBERED TVsci mapping (it was rejecting PTV/DRT/VRT/PVRT → every remembered line fell
+    // back to a fuzzy 50% match, making it look un-mapped). CTV/OTT kept for any legacy campaigns.
+    "TVsci Spend":   new Set(["PTV","DRT","VRT","PVRT","CTV","OTT"]),
+    "TVsci Daily":   new Set(["PTV","DRT","VRT","PVRT","CTV","OTT","OTTD"]),
   };
 
   // Exact-first matching: given a TTD client name, find the tracker campaign.
