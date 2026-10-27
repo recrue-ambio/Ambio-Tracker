@@ -16856,6 +16856,21 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
     const targets = (fileSource==="DSP" && adv) ? fileRows.map((_,j)=>j).filter(j=>advOf(j)===adv) : [i];
     setMapping(mp=>{ const next={...mp}; targets.forEach(j=>{ next[j]=val; }); return next; });
     setMatchConf(mc=>{ const n={...mc}; targets.forEach(j=>{ if(val) n[j]=1.0; else delete n[j]; }); return n; });
+    // Remember a manual pick IMMEDIATELY — don't wait for Apply. If a long mapping session's Apply gets
+    // interrupted (review gate, closed panel, a nav away), the hand-picked mappings are still saved so they
+    // come back as "remembered" next time instead of reverting to a fuzzy auto-match. Apply still writes the
+    // spend; this only persists the name→campaign memory. (Unmapping leaves the prior memory in place.)
+    if(val && Array.isArray(fileRows)){
+      const entries = targets.map(j=>{
+        const row=fileRows[j]; if(!row) return null;
+        const c=fullPool.find(x=>String(x.id)===String(val));
+        const e={ csvName:getCampName(row,fileSource), campId:String(val), campName:c?c.campaignName:"" };
+        if(fileSource==="TradeDesk"||fileSource==="DSP"){ try{ e.advertiserName=getTTDAdvertiserName(row); }catch{} }
+        if(fileSource==="Google"){ try{ e.accountName=getGoogleAccountName(row); }catch{} }
+        return e;
+      }).filter(e=>e&&e.csvName);
+      if(entries.length) persistNameMappings(fileSource, entries);
+    }
   };
   // ── Creative (per-ad) report mode ──────────────────────────────────────────
   // A FB creative report is one row per AD/creative (it has an "Ads" column). It's purely informational
@@ -16877,7 +16892,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
   const [savedMappings, setSavedMappings] = React.useState(()=>{
     try{ return JSON.parse(localStorage.getItem(CSV_MAPPINGS_KEY)||"{}"); } catch{ return {}; }
   });
-  function persistMappings(m){ setSavedMappings(m); try{ localStorage.setItem(CSV_MAPPINGS_KEY,JSON.stringify(m)); }catch{} }
+  function persistMappings(m){ setSavedMappings(m); try{ localStorage.setItem(CSV_MAPPINGS_KEY,JSON.stringify(m)); }catch(e){ try{ setFileError("⚠ Couldn't save the mappings — storage is full. Free space in Config → Storage, then try again."); }catch{} } }
 
   // ── User initials — used to filter company-wide DSP dumps to just your campaigns ──
   const [userInitials, setUserInitialsState] = React.useState(()=>{
@@ -17754,42 +17769,38 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
     // For TradeDesk: save under the stable advertiser name key (not the campaign name).
     // For Google: save under the stable account name key (not the campaign name).
     // Also save under the campaign name key as a legacy fallback.
-    const next={...savedMappings};
-    mappingEntries.forEach(({csvName,campId,campName,advertiserName,accountName})=>{
-      if(!campId) return;
-      const payload={campId,campName,source,learnedAt:getToday()};
-      if(source==="TradeDesk" && advertiserName){
-        // Compound key: adv + TTD campaign name — one slot per row, never collides across
-        // multiple tracker campaigns that share the same TTD advertiser.
-        // We do NOT write the adv-only key here — that caused collision bugs.
-        next[makeTTDNameKey(advertiserName, csvName)]={...payload,advertiserName,ttdCampName:csvName};
-      }
-      if(source==="DSP" && advertiserName){
-        // Stable per-advertiser key (DSP campaign names change monthly). One advertiser → one DSP campaign.
-        next[`DSP||adv:${advertiserName.trim().toLowerCase()}`]={...payload,advertiserName};
-      }
-      if(source==="Google" && accountName){
-        // Primary stable key: account name (same across all future exports)
-        next[makeGoogleNameKey(accountName)]={...payload,accountName};
-      }
-      if(source==="Facebook/Meta" && accountName){
-        // TapClicks Facebook XLSX format. Write BOTH keys:
-        //  - Compound (acc + camp): authoritative, unique per row even when
-        //    multiple ad sets in the same account route to different tracker campaigns
-        //  - Acc-only: convenient fallback for the 1-campaign-per-account case
-        // The lookup tries compound first, then falls through to acc-only.
-        // csvName for FB is "{Account} · {Campaign}" — split out the campaign sub-name.
-        const fbCampSub = csvName.includes(" · ") ? csvName.split(" · ").slice(1).join(" · ") : "";
-        if (fbCampSub) {
-          next[`Facebook/Meta||acc:${accountName.toLowerCase()}||camp:${fbCampSub.toLowerCase()}`] = {...payload, accountName, fbCampSub};
+    // FUNCTIONAL update (reads the latest state) so rapid back-to-back saves — e.g. remembering every
+    // dropdown pick as you map a long file — can't clobber each other via a stale `savedMappings` closure.
+    if(!mappingEntries || !mappingEntries.length) return;
+    setSavedMappings(prev=>{
+      const next={...prev};
+      mappingEntries.forEach(({csvName,campId,campName,advertiserName,accountName})=>{
+        if(!campId) return;
+        const payload={campId,campName,source,learnedAt:getToday()};
+        if(source==="TradeDesk" && advertiserName){
+          // Compound key: adv + TTD campaign name — one slot per row, never collides across
+          // multiple tracker campaigns that share the same TTD advertiser.
+          next[makeTTDNameKey(advertiserName, csvName)]={...payload,advertiserName,ttdCampName:csvName};
         }
-        next[`Facebook/Meta||acc:${accountName.toLowerCase()}`] = {...payload, accountName};
-      }
-      // Always also save by campaign name as a fallback key (used by non-TTD/Google sources
-      // and as legacy fallback for older TTD saves that lacked the compound key).
-      if(csvName) next[makeNameKey(source,csvName)]=payload;
+        if(source==="DSP" && advertiserName){
+          next[`DSP||adv:${advertiserName.trim().toLowerCase()}`]={...payload,advertiserName};
+        }
+        if(source==="Google" && accountName){
+          next[makeGoogleNameKey(accountName)]={...payload,accountName};
+        }
+        if(source==="Facebook/Meta" && accountName){
+          const fbCampSub = csvName.includes(" · ") ? csvName.split(" · ").slice(1).join(" · ") : "";
+          if (fbCampSub) next[`Facebook/Meta||acc:${accountName.toLowerCase()}||camp:${fbCampSub.toLowerCase()}`] = {...payload, accountName, fbCampSub};
+          next[`Facebook/Meta||acc:${accountName.toLowerCase()}`] = {...payload, accountName};
+        }
+        if(csvName) next[makeNameKey(source,csvName)]=payload;
+      });
+      // Persist to this browser. A SILENT failure here (storage full) is exactly how a long mapping session
+      // "didn't save" — so surface it instead of swallowing it.
+      try{ localStorage.setItem(CSV_MAPPINGS_KEY,JSON.stringify(next)); }
+      catch(e){ try{ setFileError("⚠ Couldn't save the mappings — this browser's storage is full, so the name memory won't persist. Free space in Config → Storage (export + clear old monthly backups), then re-map."); }catch{} }
+      return next;
     });
-    persistMappings(next);
   }
 
   // Legacy: kept only for backward-compat reads; new saves use per-name keys above
