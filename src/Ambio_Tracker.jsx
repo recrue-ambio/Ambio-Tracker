@@ -20430,7 +20430,15 @@ function RevenueDashboard({ campaigns=[], monthPnl=null, onEdit=()=>{}, onLock=(
     let cumB = 0, cumS = 0, prevCumOver = 0, moReported = false;
     for (let m = startMo; m <= mo; m = nextMo(m)) {
       const s = spendOf(m);
-      if (s == null) continue;                                // unreported month — skip
+      if (s == null) {
+        // FEE (Ambio): a prior month's media budget was still ALLOCATED even if no per-month spend is
+        // reported yet (no month-close backup exists), and the CURRENT month's lifetime spend already
+        // spans that month — so still count its BUDGET. Otherwise the whole lifetime spend gets compared
+        // against just one month's budget share → a large FALSE overage that wrongly docks the fee. SEM's
+        // monthly "$X/Mo" budgets are independent per month, so SEM still skips unreported months entirely.
+        if (isFee && m < mo) cumB += budgetOf(m);
+        continue;                                             // unreported month — no spend to add
+      }
       if (m === mo) { prevCumOver = Math.max(0, cumS - cumB); moReported = true; }
       cumB += budgetOf(m);
       cumS += s;
