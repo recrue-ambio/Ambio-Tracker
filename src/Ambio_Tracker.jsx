@@ -18149,10 +18149,19 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
     // campaign per day, TRUE DAILY values — those get scoped to the pacing month first, and summing
     // them IS this month's MTD. Either way this supersedes the lifetime spend sheet: no lifetime
     // deltas, no monthly-flight rebuild.
-    // Every advertiser is kept, not just "Recrue_*" — the user: "I don't currently run any Ambio
-    // accounts but you can keep them in here and be able to be mapped." They simply won't auto-match
-    // anything he doesn't have; if he takes one on, he maps it once and it's remembered.
+    // Ambio fork: the shared TVsci daily sheet is the whole network's book — keep ONLY this side's
+    // "Ambio_*"/"AMB_*" education accounts (by Advertiser Name) and DROP every other rep's "Recrue_*"
+    // client (Austin: "only include the Ambio from the advertiser names on these drops"). Filtered HERE,
+    // before the campaign-name rollup, so a Recrue line can never reach the review list or get rolled
+    // into an Ambio campaign's aggregate.
     if(source==="TVsci Daily"){
+      const _isAmbioAdv = r => /^(ambio|amb)[_\s-]/i.test(String(r["Advertiser Name"]||"").trim());
+      const _nonAmbioDropped = rows.length - rows.filter(_isAmbioAdv).length;
+      rows = rows.filter(_isAmbioAdv);
+      if(!rows.length){
+        setFileError(`No Ambio rows in this TVsci daily report — every "Advertiser Name" was a non-Ambio account (e.g. Recrue_*).`);
+        return;
+      }
       const before = rows.length;
       const inMonth = (v) => {
         const d = tvsciDate(v); if(!d) return false;
@@ -18172,8 +18181,9 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
       const agg = {};
       scoped.forEach(r => {
         const name = String(r["Campaign Name"]||"").trim(); if(!name) return;
-        const a = agg[name] || (agg[name] = { name, impr:0, spend:0, clicks:0, clicksKnown:false,
+        const a = agg[name] || (agg[name] = { name, advertiser:"", impr:0, spend:0, clicks:0, clicksKnown:false,
                                               completed:0, days:new Set(), adgroups:new Set(), last:"", byGroup:{} });
+        if(!a.advertiser){ const _adv = String(r["Advertiser Name"]||"").trim(); if(_adv) a.advertiser = _adv; }
         const impr = parseInt(String(r["Impressions"]??"").replace(/[^0-9-]/g,""))||0;
         const spend = parseFloat(String(r["Spend"]??"").replace(/[$,\s]/g,""))||0;
         a.impr  += impr;
@@ -18205,6 +18215,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
       // pre-built __breakdown of its ad groups (the apply picks this up instead of one lump line).
       rows = Object.values(agg).map(a => ({
         "Campaign Name": a.name,
+        "Advertiser Name": a.advertiser,   // carried through the rollup so the matcher's client fallback can read it
         "Impressions": a.impr,
         "Spend": a.spend,
         ...(a.clicksKnown ? { "Click": a.clicks } : {}),           // omitted entirely when unknown
@@ -18227,9 +18238,10 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
       const lastDate = rows.reduce((m,r)=> r.__lastDate > m ? r.__lastDate : m, "");
       if(lastDate) setQciAsOf(`${lastDate}T23:59`);
       const groups = rows.reduce((s,r)=>s+(r.__adgroups||0),0);
-      setSavedMsg(hasDate
+      const _dropNote = _nonAmbioDropped>0 ? ` · 🚫 ${_nonAmbioDropped.toLocaleString()} non-Ambio row${_nonAmbioDropped!==1?"s":""} dropped` : "";
+      setSavedMsg((hasDate
         ? `Rolled ${before.toLocaleString()} daily rows → ${rows.length} campaign${rows.length!==1?"s":""} · through ${fmtDate(lastDate)}`
-        : `Rolled ${before.toLocaleString()} rows (${groups} ad group${groups!==1?"s":""}) → ${rows.length} campaign${rows.length!==1?"s":""} · month-to-date`);
+        : `Rolled ${before.toLocaleString()} rows (${groups} ad group${groups!==1?"s":""}) → ${rows.length} campaign${rows.length!==1?"s":""} · month-to-date`) + _dropNote);
     }
 
     // ── Snapchat platform export (ad-level): roll up to one row per campaign + build the creative
@@ -18524,7 +18536,12 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
         // weak, so multi-flight accounts (one Ad Account → University of Iowa Geofence/Tippie/RT/Juniors/…)
         // still disambiguate by their sub-account token from the CAMPAIGN name instead of all tying on the
         // shared Ad Account. The result is a pre-fill suggestion the review gate still vets before Apply.
-        const sAccount = ambioClient(String(row["Ad Account Name"]||"").replace(/^ambio[_\s\-]+/i,""));
+        // The account/advertiser column differs by source: TVsci Spend carries "Ad Account Name", TVsci
+        // Daily carries "Advertiser Name" (both like "Ambio_<Client>"). Read whichever is present and strip
+        // the Ambio/AMB prefix to the bare client — WITHOUT this, Daily rows had no account fallback, so a
+        // campaign name with an "(F26)" tag ("Alvernia (F26) - Video RT" → client token "alvernia f26")
+        // scored 0.5 against "Alvernia University" and auto-matched NOTHING.
+        const sAccount = ambioClient(String(row["Ad Account Name"]||row["Advertiser Name"]||"").replace(/^(ambio|amb|recrue)[_\s\-]+/i,""));
         const scorePass = (sc)=>{
           let bId="", bSc=0, ti=false;
           assignPool.forEach(c=>{
