@@ -18523,8 +18523,12 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
         // Ambio naming: the sheet and the tracker label the same tactic differently — sheet
         // "UMass Amherst - Video RT" ↔ tracker "UMass Amherst - RT (TVSci Video)". Match on the CLIENT
         // (fuzzy) PLUS a normalized TACTIC token (both wordings collapse to the same token), so a CTV/OTT
-        // row can't land on the client's RT line and vice-versa. Platform-agnostic (an Ambio campaign can
-        // be on any platform code), so match the whole active pool — not a platform-restricted subset.
+        // row can't land on the client's RT line and vice-versa.
+        // STAY ON-PLATFORM: match ONLY within the TVsci family (matchCandidates = SOURCE_PLATFORMS gate +
+        // the user's platform pills + not-yet-started filter). Was `assignPool` (every active campaign),
+        // which let a TVsci row land on a TradeDesk/SEM/YT line that happened to share the client + a
+        // tactic token — e.g. "Iowa (Tippie F26) - Display Outreach" matched the TD "University of Iowa
+        // (Tippie) - Display Outreach". A TVsci drop must never auto-match or offer non-TVsci campaigns.
         // Ambiguous client (several same-prefix campaigns) or unknown tactic → low confidence so the ⚠
         // review gate catches it; whatever you map is then REMEMBERED for the next sync.
         const rawName = getCampName(row, source);
@@ -18544,7 +18548,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
         const sAccount = ambioClient(String(row["Ad Account Name"]||row["Advertiser Name"]||"").replace(/^(ambio|amb|recrue)[_\s\-]+/i,""));
         const scorePass = (sc)=>{
           let bId="", bSc=0, ti=false;
-          assignPool.forEach(c=>{
+          matchCandidates.forEach(c=>{
             const cTactic = ambioTactic(c.campaignName);
             if(sTactic && cTactic && sTactic !== cTactic) return;               // tactics known and disagree → skip
             let score = fuzzyScore(sc, ambioClient(c.campaignName));
