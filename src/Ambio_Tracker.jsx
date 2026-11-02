@@ -10187,15 +10187,20 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     if(_spendPaced && _budget > 0 && _delivered > _budget*1.01 && !_endedF) out.push("overspend");
     // Ending soon with budget left — flight ends within 5 days but under 85% of the budget has delivered.
     if(_spendPaced && _budget > 0 && _dr !== null && _dr >= 0 && _dr <= 5 && _delivered < _budget*0.85) out.push("endsoon");
-    // Not spending — active, started 3+ days ago, but $0 lifetime spend (never launched / stalled / unmapped).
+    // Not spending — active, started 7+ days ago, we've SYNCED its spend at least once, and it's STILL $0.
+    // The "ever synced" gate is key: during setup a campaign that just hasn't been mapped/synced yet shows
+    // $0 and would scream "not spending" (the big source of the flags being "a bit much"). We only flag a
+    // line as genuinely dark once its spend has actually been pulled and came back zero. Grace raised 3→7d.
     if(c.status==="active" && _spendPaced && _started && !_endedF && _delivered <= 0 && c.startDate){
       const _ago = Math.round((new Date(_today) - new Date(c.startDate.slice(0,10)))/86400000);
-      if(_ago >= 3) out.push("nostart");
+      const _everSynced = !!(c.tvsciSpendAsOf || c.lastSpendSync);
+      if(_ago >= 7 && _everSynced) out.push("nostart");
     }
-    // Stale spend — synced before but not in 7+ days, so its pacing numbers are outdated.
+    // Stale spend — synced before but not in 14+ days, so its pacing numbers are outdated. (Was 7d — too
+    // twitchy for a weekly sync cadence; bumped to 14d to cut flag noise.)
     { const _asof = c.tvsciSpendAsOf || c.lastSpendSync;
       if(_spendPaced && !_endedF && _asof){ const _d = new Date(_asof);
-        if(!isNaN(_d) && Math.round((new Date(_today) - _d)/86400000) >= 7) out.push("stale"); } }
+        if(!isNaN(_d) && Math.round((new Date(_today) - _d)/86400000) >= 14) out.push("stale"); } }
 
     const g = gradeCampaignKpis(merged, kpiBenchmarks);   // g.ctr/g.vcr/g.cpm set only at sev≥2
     if(g.ctr) out.push("ctr");
@@ -18546,6 +18551,21 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
         // campaign name with an "(F26)" tag ("Alvernia (F26) - Video RT" → client token "alvernia f26")
         // scored 0.5 against "Alvernia University" and auto-matched NOTHING.
         const sAccount = ambioClient(String(row["Ad Account Name"]||row["Advertiser Name"]||"").replace(/^(ambio|amb|recrue)[_\s\-]+/i,""));
+        // The account name is the WHOLE-school client ("Oklahoma State University") — it has no sub-program,
+        // so when a school runs several books (OSU Branding / Enrollment-OK / DFW-Enrollment / …) the account
+        // alone ties across ALL of them (every variant scored the same → a 50% review-gate tie, landing data
+        // on the wrong line). The distinguishing token lives in the campaign name's parenthetical
+        // ("OSU (Branding) - CTV/OTT"), which the file ABBREVIATES the client in ("OSU") so the raw campaign
+        // name can't fuzzy-match the spelled-out tracker name. So fold the account client TOGETHER with the
+        // campaign's sub-program parenthetical → "oklahoma state university branding", which matches the
+        // tracker's own "Oklahoma State University (Branding)" and disambiguates the sub-programs. Flight
+        // tags ("(F26)", "(SP26)") are dropped so single-book schools (Alvernia) still match on the account.
+        const _subTokens = (String(rawName).match(/\(([^)]+)\)/g) || [])
+          .map(p => p.replace(/[()]/g, "").trim())
+          .filter(p => p && !/^[a-z]{1,3}\d{2,4}$/i.test(p));   // keep "Branding"/"UG"/"DFW-Enrollment"; drop "F26"
+        const sAccountPlus = _subTokens.length
+          ? (sAccount + " " + _subTokens.join(" ")).toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim()
+          : sAccount;
         const scorePass = (sc)=>{
           let bId="", bSc=0, ti=false;
           matchCandidates.forEach(c=>{
@@ -18561,8 +18581,8 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
         };
         if(sClient){
           let r = scorePass(sClient);
-          if(r.bSc < 0.6 && sAccount && sAccount!==sClient){   // weak name match → retry with the full Ad-Account client
-            const r2 = scorePass(sAccount);
+          if(r.bSc < 0.6 && sAccountPlus && sAccountPlus!==sClient){   // weak name match → retry with the full account client + sub-program
+            const r2 = scorePass(sAccountPlus);
             if(r2.bSc > r.bSc) r = r2;
           }
           if(r.bId){ initMap[i]=r.bId; initConf[i]= r.ti ? 0.5 : Math.min(1, r.bSc); autoCount++; }
@@ -20800,6 +20820,12 @@ function RevenueDashboard({ campaigns=[], monthPnl=null, onEdit=()=>{}, onLock=(
     // unlock→edit→relock, or a spend-logged/0-impression campaign) would be counted by the table's
     // focusCell but SKIPPED here — making a locked month's headline profit drift above the table total.
     months.forEach(mo => {
+      // A campaign earns nothing AFTER its flight ends. Skip any month past the end date so a stray
+      // month-end-close point dated on the 1st of the next month (a Sep-30 flight's final total captured
+      // 10/01) can't book that delivery as the NEXT month's cost — which silently dragged Sep tails into
+      // October's chart bar and made it disagree with the headline tiles once unlocked. Mirrors the same
+      // guard estMonthlyProfit already applies, and the dateVisibleRows "show ended" filter.
+      if (c.endDate && c.endDate.slice(0,7) < mo) return;
       // Goal→billed via the shared resolver (delivery cap · SEM paused-month · lock freeze) so the tiles,
       // chart, and Export P&L always match the per-campaign table below. For a locked month billedRevenue
       // ignores goalRev and returns the frozen per-campaign revenue, so passing spread[mo]||0 is safe.
@@ -20877,6 +20903,10 @@ function RevenueDashboard({ campaigns=[], monthPnl=null, onEdit=()=>{}, onLock=(
     const monthCells = {};
     let windowRev=0, windowSpend=0, windowDeviceFee=0, windowHasSpend=false;
     months.forEach(mo => {
+      // Same end-date guard as the monthTotals rollup above: a campaign contributes nothing to a month
+      // past its flight end, so a next-month-1st close point can't leak its final total into the wrong
+      // month's P&L. Keeps the per-campaign table + Export P&L in lockstep with the chart and tiles.
+      if (c.endDate && c.endDate.slice(0,7) < mo) { monthCells[mo] = { rev:0, spend:null, deviceFee:0, profit:null, pending:false }; return; }
       // Goal→billed via the shared resolver — bills on actual delivery (capped at goal), zeroes a closed
       // SEM month with no spend, and freezes to the lock. Same function the tile/chart rollups use, so
       // the table can never drift from the headline numbers or the Export P&L.
@@ -27478,6 +27508,30 @@ export default function App() {
                                   ? "Archive is already slim — no delivery detail to strip and nothing older than "+ARCHIVE_RETENTION_MONTHS+" months."
                                   : <>Frees about <b style={{color:txt}}>{fmtBytes(plan.freed)}</b> — strips delivery detail from {plan.withDetail} archived campaign{plan.withDetail!==1?"s":""}{plan.drop.length>0?<> and deletes {plan.drop.length} archived before {fmtDate(plan.cutIso)}</>:null}. Export a JSON backup first.</>}
                                 {plan.protectedRecent>0 && <><br/><b style={{color:lightMode?"#024744":"#00d48a"}}>🛡 Revenue-safe:</b> {plan.protectedRecent} campaign{plan.protectedRecent!==1?"s":""} that ran in the last {plan.safeMonths} months {plan.protectedRecent!==1?"are":"is"} left fully intact.</>}
+                              </span>
+                            </div>
+                          );
+                        })()}
+                        {/* One-click reset of the whole check-in name-memory — Austin's start-of-month
+                            "re-map everything fresh" button. Clears CSV_MAPPINGS_KEY only; campaigns,
+                            delivery and revenue are untouched. */}
+                        {(()=>{
+                          let mapCount=0; try{ mapCount=Object.keys(JSON.parse(localStorage.getItem(CSV_MAPPINGS_KEY)||"{}")).length; }catch{}
+                          return (
+                            <div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${brd2}`,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                              <button
+                                onClick={async ()=>{
+                                  if(mapCount===0){ await confirm({title:"No saved mappings",message:"There are no remembered check-in mappings to clear.",confirmLabel:"OK",okOnly:true}); return; }
+                                  if(!await confirm({ title:`Clear all ${mapCount} remembered check-in mapping${mapCount!==1?"s":""}?`, message:`Every line→campaign match the tracker has learned gets forgotten, so your NEXT check-in or TVsci sync re-matches everything from scratch for you to confirm fresh.\n\nYour campaigns, delivery and revenue are NOT touched — only the auto-match memory. Export a JSON backup first if you want a safety copy.`, confirmLabel:`Yes, clear ${mapCount}`, danger:true })) return;
+                                  try{ localStorage.removeItem(CSV_MAPPINGS_KEY); }catch{}
+                                  addLog({ type:"edited", campaignName:"Check-in mappings", partner:"", platform:"", detail:`Cleared all ${mapCount} remembered check-in mappings (fresh re-map)`, prevSnapshot:null, campaignId:null });
+                                  await confirm({ title:"✅ Mappings cleared", message:"All remembered check-in mappings were removed. Your next file drop or TVsci sync will re-match from scratch.", confirmLabel:"Done", okOnly:true });
+                                }}
+                                style={{background:mapCount===0?(lightMode?"#e2f0ea":"#0b2522"):(lightMode?"#fef3c7":"#2a1e0f"),border:`1px solid ${mapCount===0?brd2:(lightMode?"#fcd34d":"#7c5e1d")}`,borderRadius:7,padding:"6px 12px",color:mapCount===0?sub:(lightMode?"#b45309":"#fcd34d"),fontSize:11,fontWeight:700,cursor:mapCount===0?"default":"pointer",whiteSpace:"nowrap"}}>
+                                🗑 Reset check-in mappings
+                              </button>
+                              <span style={{fontSize:10,color:sub,lineHeight:1.5,flex:1,minWidth:200}}>
+                                {mapCount===0 ? "No remembered mappings yet." : <>Forgets all <b style={{color:txt}}>{mapCount}</b> remembered line→campaign matches so your next drop/sync re-matches fresh. Campaigns, delivery &amp; revenue stay. <b>Good for a clean start-of-month re-map.</b></>}
                               </span>
                             </div>
                           );
