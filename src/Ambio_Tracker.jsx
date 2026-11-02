@@ -2072,9 +2072,18 @@ function buildDeliverySeries(metricSeries, startDate, now) {
       const total = endMs - startMs;
       const est = total > estThr;
       let cur = startMs;
+      let guard = 0;
       while(cur < endMs){
+        // Safety net: a single reading-to-reading gap is always within one month (~31 days). If we ever
+        // exceed that, bail rather than spin — protects against bad dates and clock edge cases.
+        if(++guard > 400) break;
         const day0=new Date(cur); day0.setHours(0,0,0,0);
-        const segEnd = Math.min(endMs, day0.getTime()+DAY);
+        // Advance to the next LOCAL calendar midnight via date arithmetic — NOT day0+86400000ms. On the
+        // daylight-saving "fall back" day (25h long, e.g. Nov 1), adding a fixed 24h lands at 23:00 the
+        // SAME day, so `cur` never passes the boundary and the loop stalls (tens of millions of spins /
+        // a frozen tab). new Date(y,m,d+1) is the real next midnight regardless of DST, so cur always moves.
+        let segEnd = Math.min(endMs, new Date(day0.getFullYear(), day0.getMonth(), day0.getDate()+1).getTime());
+        if(segEnd <= cur) segEnd = Math.min(endMs, cur + DAY); // belt-and-suspenders: guarantee forward progress
         const frac = (segEnd - cur)/total;
         const k=keyFn(new Date(cur)).getTime();
         const o=bk.get(k)||{i:0,c:0,s:0,vv:0,est:false}; o.i+=i*frac; o.c+=c*frac; o.s+=s*frac; o.vv+=vv*frac; o.est=o.est||est; bk.set(k,o);
