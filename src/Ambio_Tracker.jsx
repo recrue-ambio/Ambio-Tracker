@@ -419,7 +419,7 @@ function severePacing(pacing){
 // Ambio-first (spend + management fee): the spend-model signals lead, the delivery-quality ones (ctr/cpm/vcr/
 // freq/rate) trail. pausespend/overspend/endsoon/nostart/stale key off the TVsci spend sync + media budget.
 const TROUBLE_REASON_ORDER  = ["pausespend","overspend","pace","capped","endsoon","nostart","stale","ctr","cpm","vcr","goalhit","freq","rate","dark"];
-const TROUBLE_REASON_LABEL  = { pausespend:"Paused but spending", overspend:"Over budget", endsoon:"Ending soon", nostart:"Not spending", stale:"Stale spend", pace:"Pacing", capped:"Capped", ctr:"CTR", cpm:"CPM", vcr:"Completion", goalhit:"Hit goal early", freq:"Frequency", rate:"No rate", dark:"Went dark" };
+const TROUBLE_REASON_LABEL  = { pausespend:"Paused but spending", overspend:"Over budget", endsoon:"Ending soon", nostart:"Not spending", stale:"Stale spend", pace:"Pacing", capped:"Daily", ctr:"CTR", cpm:"CPM", vcr:"Completion", goalhit:"Hit goal early", freq:"Frequency", rate:"No rate", dark:"Went dark" };
 const TROUBLE_REASON_COLOR  = { pausespend:"#ef4444", overspend:"#ef4444", endsoon:"#f97316", nostart:"#f59e0b", stale:"#eab308", pace:"#ef4444", capped:"#ef4444", ctr:"#f59e0b", cpm:"#f97316", vcr:"#a855f7", goalhit:"#00d48a", freq:"#eab308", rate:"#ef4444", dark:"#ef4444" };
 // Delivery-QUALITY / minor signals (vs the money signals: pacing + spend). For Ambio's spend + management-fee
 // model these don't move revenue (fee = spend × rate no matter the CTR/CPM/VCR), so they're OFF the Trouble set
@@ -10020,10 +10020,9 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   // click cycles none → INCLUDE → EXCLUDE → none. reasonInc = OR-included reasons; reasonExc = reasons to hide.
   const [reasonInc, setReasonInc] = useState(()=>new Set());
   const [reasonExc, setReasonExc] = useState(()=>new Set());
-  // Essential (money/pacing) vs All (also delivery-quality/minor) flags. Default OFF = money signals only,
-  // so the Trouble count stays actionable for Ambio's spend+fee book (Austin: the flags were "a bit much").
-  const [troubleShowQuality, setTroubleShowQuality] = useState(()=>{ try{ return localStorage.getItem("ambio-trouble-quality")==="1"; }catch{ return false; } });
-  const toggleTroubleQuality = () => setTroubleShowQuality(v=>{ const nv=!v; try{ localStorage.setItem("ambio-trouble-quality", nv?"1":"0"); }catch{} return nv; });
+  // Trouble flags are VIEW-SCOPED (Austin): the 💲 Spend tab shows only the money/pacing signals; the
+  // 📊 Metrics tab also surfaces the delivery-quality ones (CTR/CPM/VCR/freq/dark/goalhit). Driven by
+  // pacingView directly in troubleReasonsFor below — no manual toggle, so it "just works" for Adam.
   const cycleReason = (key) => {
     const ni = new Set(reasonInc), ne = new Set(reasonExc);
     if(ni.has(key)){ ni.delete(key); ne.add(key); }        // include → exclude
@@ -10272,9 +10271,9 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       const ended   = c.endDate && c.endDate.slice(0,10) < _t;
       if(started && !ended){ const ys = yesterdayFromSeries(c, pacingNow()); if(ys && ys.value === 0) out.push("dark"); }
     }
-    // Essential-only by default: drop the delivery-quality / minor signals unless "All signals" is on. This is
-    // what keeps the Trouble count from ballooning (CTR/CPM/VCR/freq/dark/goalhit aren't money signals here).
-    return troubleShowQuality ? out : out.filter(r => !QUALITY_TROUBLE_REASONS.has(r));
+    // View-scoped: 💲 Spend view = money/pacing signals only; 📊 Metrics view (lifetime/month) also surfaces
+    // the delivery-quality signals. Keeps the Spend tab actionable (no CTR/CPM/VCR/freq/dark/goalhit there).
+    return (pacingView !== "spend") ? out : out.filter(r => !QUALITY_TROUBLE_REASONS.has(r));
   };
   // Compute reasons once per row (moderately expensive — grade + flight pace + series) and cache by id, so the
   // filters, badge, and reason-count chips all read the SAME classification without recomputing.
@@ -13163,19 +13162,16 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
         🚩 Trouble
         {troubleCount>0 && <span style={{background:troubleOnly?"#ef4444":(lightMode?"#fee2e2":"#3a0010"),color:troubleOnly?"#fff":(lightMode?"#dc2626":"#fca5a5"),borderRadius:9,padding:"0 6px",fontSize:10,fontWeight:800}}>{troubleCount}</span>}
       </button>
-      {/* Essential (money/pacing) vs All (adds delivery-quality/minor) flags — only shown while Trouble is on.
-          Default Essential keeps the count actionable for the spend+fee book; click to surface CTR/CPM/VCR too. */}
+      {/* Trouble flags are view-scoped automatically: money/pacing on 💲 Spend, +delivery-quality on 📊 Metrics.
+          A small hint tells the user which set they're seeing (no manual toggle). */}
       {troubleOnly && (
-        <button onClick={toggleTroubleQuality}
-          title={troubleShowQuality
-            ? "Showing ALL flags, including delivery quality (CTR / CPM / completion / frequency / went-dark / hit-goal early). Click to show money + pacing signals only."
-            : "Showing money + pacing flags only (paused-but-spending, over budget, not spending, ending soon, stale, capped, pacing). Click to also include delivery-quality signals."}
-          style={{display:"flex",alignItems:"center",gap:5,padding:"6px 11px",borderRadius:7,cursor:"pointer",whiteSpace:"nowrap",fontSize:11,fontWeight:600,flexShrink:0,
-            background:troubleShowQuality?(lightMode?"#eff6ff":"#0b1f2a"):lmBgInp,
-            border:`1px solid ${troubleShowQuality?"#38bdf8":lmBrd}`,
-            color:troubleShowQuality?(lightMode?"#2563eb":"#38bdf8"):lmTxtS}}>
-          {troubleShowQuality ? "🎚 All signals" : "🎚 Essential only"}
-        </button>
+        <span title={pacingView==="spend"
+          ? "Spend view: showing money + pacing flags (paused-but-spending, over budget, not spending, ending soon, stale, capped, pacing). Switch to 📊 Metrics for delivery-quality flags."
+          : "Metrics view: showing money/pacing flags PLUS delivery-quality (CTR / CPM / completion / frequency / went-dark / hit-goal early). The 💲 Spend tab shows money signals only."}
+          style={{display:"flex",alignItems:"center",gap:5,padding:"6px 10px",borderRadius:7,whiteSpace:"nowrap",fontSize:10.5,fontWeight:600,flexShrink:0,
+            background:lmBgInp, border:`1px solid ${lmBrd}`, color:lmTxtS}}>
+          {pacingView==="spend" ? "🎚 Spend flags" : "🎚 + Quality flags"}
+        </span>
       )}
       {/* Last update — read-only chip showing the most recent check-in date,
           with the date itself in electric blue. */}
