@@ -404,7 +404,12 @@ function gradeCampaignKpis(c, benchmarks){
 // Severe pacing test — shared by the Home drill-down and the Pacing "trouble" filter.
 function severePacing(pacing){
   if(!pacing) return null;
-  if(pacing.label==="Behind" && pacing.ratio!=null && pacing.ratio<0.6) return { dir:"under", pct:Math.round(pacing.ratio*100) };
+  // Severe UNDER-pacer — but only once enough of the flight/month has elapsed that <60% of the expected
+  // pace is genuinely at risk. Delivery ramps, so a line read "behind" in its first stretch almost always
+  // self-corrects; flagging it early was the main thing inflating the Pacing/Trouble count (Austin: "104,
+  // way too much"). ≥25% elapsed, mirroring the over-branch guard below. Objects with no expectedPct
+  // (older callers) keep flagging exactly as before.
+  if(pacing.label==="Behind" && pacing.ratio!=null && pacing.ratio<0.6 && (pacing.expectedPct==null || pacing.expectedPct>=0.25)) return { dir:"under", pct:Math.round(pacing.ratio*100) };
   // Over-pacing, two ways — both waste budget (over-served impressions aren't billable, so it eats margin):
   //  1. ALREADY over-delivered past the goal (>125% of goal).
   //  2. Pacing WAY ahead of schedule (>1.5× the expected pace) — on track to blow the goal and overserve.
@@ -1542,7 +1547,14 @@ function flightPacingForTrouble(c, disp) {
   const live = mk === "views" ? (parseInt(d.videoViews || c.videoViews) || 0)
              : mk === "spend" ? (parseFloat(d.spend || c.spend) || 0)
              : (parseInt(d.impressions || c.impressions) || 0);
-  const delivered = prior + live;
+  // Ambio spend campaigns carry the TRUE cumulative in `tvsciLifetimeSpend` (the TVsci sync) — the SAME
+  // number the Spend/Flights display paces on. Using prior-backups + this-month c.spend here made the
+  // trouble pace read a FRACTION of reality (e.g. a line truly at 35% read as 9%), which false-flagged
+  // dozens of on-pace lines as "severely behind" (Austin 2026-11-09, verified on his live import: pace
+  // flags 86→29 once this matches the display). Prefer the lifetime figure for spend-paced campaigns.
+  let delivered;
+  if (mk === "spend") { const tv = parseFloat(c.tvsciLifetimeSpend) || 0; delivered = tv > 0 ? tv : (prior + live); }
+  else delivered = prior + live;
   if (!(delivered > 0)) return null;               // no delivery → not a pacing problem (that's "No data")
   const lp = computeLifetimePacing(c, delivered, goalNum);
   if (!lp) return null;
@@ -10004,7 +10016,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   const [fStatuses,      setFStatuses]      = useState(new Set(_persisted.fStatuses || [])); // multi-select status filter (Active / Pacing Behind / Off …), empty = all
   const [fExcludeGoalHit, setFExcludeGoalHit] = useState(false); // button removed from Pacing (goal-hit rows just sort to the bottom now); kept false so the filter plumbing stays a no-op
   const [fExcludeZeroSpend, setFExcludeZeroSpend] = useState(_persisted.fExcludeZeroSpend !== undefined ? !!_persisted.fExcludeZeroSpend : true); // hide $0-spend clutter — ON by default (the user), respects an explicit toggle-off
-  const [fGroupsOnly, setFGroupsOnly] = useState(!!_persisted.fGroupsOnly); // 💲 Spend view: show only pacing groups (hide standalone lines)
+  const [fGroupsOnly, setFGroupsOnly] = useState(_persisted.fGroupsOnly===true ? "only" : (_persisted.fGroupsOnly||"")); // ""=all · "only"=groups only · "exclude"=hide groups (standalone only)
   // Pacing sort config. METRIC_SORTS = keys that read a numeric metric from the resolved `disp`.
   // SORT_DEFAULT_DIR = each key's starting direction. EVERY key is direction-toggleable (click the
   // active key again to reverse); ctr defaults low-first (worst), $/impr default high-first, text A–Z.
@@ -10238,8 +10250,17 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
         const goalNum = parseGoalNumber(pacingGoalRaw(c));
         const delivered = parseFloat(c.tvsciLifetimeSpend)||0;
         const remaining = Math.max(0, goalNum - delivered);
-        const needPerDay = remaining / Math.max(1, dr - 1);
-        if(goalNum > 0 && needPerDay > dbNum * 1.15) out.push("capped");
+        // Where delivery LANDS if the synced daily cap runs full every remaining day (aim ~1 day early).
+        const maxPossible = dbNum * Math.max(1, dr - 1);
+        const finalPct = goalNum > 0 ? (delivered + maxPossible) / goalNum : 1;
+        // Only a real problem when the cap can't reach ~95% of the goal — a flight that lands ≥95% is
+        // "ended ~at goal", not an underspend. AND it must be actionable: end near (≤30d — bump the cap
+        // now) OR badly under (<80% final — stuck no matter the runway, e.g. a $857K line on a $330/day
+        // cap). This keeps the genuinely under-budgeted lines Austin needs (verified on his import) while
+        // dropping lines that land 96–98% with weeks left (recoverable noise) and the "slightly behind"
+        // false flags that were inflating the Trouble count (Austin: "flagging 104, way too much").
+        if(goalNum > 0 && finalPct < 0.95 && (dr <= 30 || finalPct < 0.80))
+          out.push("capped");
       }
     }
     // Hit goal with days to spare — 100%+ of goal while still in flight with 4+ days left (over-serving
@@ -10271,6 +10292,12 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       const ended   = c.endDate && c.endDate.slice(0,10) < _t;
       if(started && !ended){ const ys = yesterdayFromSeries(c, pacingNow()); if(ys && ys.value === 0) out.push("dark"); }
     }
+    // De-dupe the PACING axis so one campaign shows ONE pacing flag, not three (Austin: least clutter, no
+    // double-counting). "Over budget" already says the line is spending past budget / too fast — so when it
+    // fires, drop the redundant "Pacing" (here it can only be the over-pace direction — a behind line can't be
+    // over budget) and "Hit goal early" (goal = budget for the spend model, so hitting goal early IS over
+    // budget). Under-pacing / behind lines keep their "Pacing" flag untouched; quality flags (CTR/CPM/…) stay.
+    if(out.includes("overspend")){ for(const k of ["pace","goalhit"]){ const i=out.indexOf(k); if(i>=0) out.splice(i,1); } }
     // View-scoped: 💲 Spend view = money/pacing signals only; 📊 Metrics view (lifetime/month) also surfaces
     // the delivery-quality signals. Keeps the Spend tab actionable (no CTR/CPM/VCR/freq/dark/goalhit there).
     return (pacingView !== "spend") ? out : out.filter(r => !QUALITY_TROUBLE_REASONS.has(r));
@@ -10395,7 +10422,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   const pacingMonthStart = (()=>{ const n=pacingNow(); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-01`; })();
   const pacingMonthEnd = (()=>{ const n=pacingNow(); const d=new Date(n.getFullYear(), n.getMonth()+1, 0); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; })();
   const partialFlight = c => !!c && ((c.startDate && c.startDate > pacingMonthStart) || (c.endDate && c.endDate < pacingMonthEnd));
-  const orderMap={"Behind":0,"No data":1,"On Track":2,"Ahead":3};
+  const orderMap={"No data":0,"Behind":1,"On Track":2,"Ahead":3};  // No-data (not-yet-delivering) lines pin to the TOP — they need eyes first (Austin)
   // Cache yesterday's %-of-needed per campaign so the "Yest vs Need" sort doesn't recompute the daily
   // delivery spread on every comparison (sortFn runs O(n log n) times over ~100 campaigns).
   const _yestNeedCache = new Map();
@@ -10458,10 +10485,28 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     const am = offHasMetrics(a) ? 0 : 1, bm = offHasMetrics(b) ? 0 : 1;
     return am!==bm ? am-bm : sortFn(a,b);
   });
-  const behind  = withGoal.filter(r=>r.pacing?.label==="Behind");
-  const onTrack = withGoal.filter(r=>r.pacing?.label==="On Track");
-  const ahead   = withGoal.filter(r=>r.pacing?.label==="Ahead");
-  const noPace  = withGoal.filter(r=>!r.pacing);
+  // Section routing must be EXHAUSTIVE: every withGoal row has to land in exactly one of
+  // behind / onTrack / ahead / noPace, or it renders NOWHERE. The naive exact-label match missed
+  // FLIGHT rows pulled in under Trouble (showFlightsHere) — their pacing is crossMonthFlightPacing,
+  // whose labels are "Goal hit"/"Missed"/"Ended short"/"Slightly behind"/… NOT the monthly
+  // "Behind"/"On Track"/"Ahead" set. An over-budget flight (pct≥1 → "Goal hit") slipped past all four
+  // filters, so "Over budget" counted 9 but showed 0 rows. Fold any label into a bucket using the
+  // same rule severePacing/crossMonthFlightPacing use (~L1564): Behind/Missed/short → behind,
+  // pct≥1 or Ahead/Goal hit/at goal → ahead, "No data"/no pacing → noPace, else on track.
+  // OVER BUDGET takes precedence over "ahead": a line that's spent past its budget isn't doing well —
+  // the overage docks the management fee (Austin). Route it by the ACTUAL `overspend` flag so this red
+  // section matches the "Over budget" chip/count exactly, instead of sitting under a green "Ahead".
+  const _secOf = r =>
+      (!r.pacing || r.pacing.label==="No data")                                 ? "nopace"
+    : reasonsOf(r).includes("overspend")                                        ? "over"
+    : /Behind|Missed|short/i.test(r.pacing.label||"")                           ? "behind"
+    : ((r.pacing.pct>=1) || /Ahead|Goal hit|at goal/i.test(r.pacing.label||"")) ? "ahead"
+    :                                                                             "ontrack";
+  const behind     = withGoal.filter(r=>_secOf(r)==="behind");
+  const onTrack    = withGoal.filter(r=>_secOf(r)==="ontrack");
+  const ahead      = withGoal.filter(r=>_secOf(r)==="ahead");
+  const overBudget = withGoal.filter(r=>_secOf(r)==="over");
+  const noPace     = withGoal.filter(r=>_secOf(r)==="nopace");
   const anyFilter = q || searchTerms.length>0 || fPartner!=="all" || fPlatforms.size>0 || fStatuses.size>0 || fExcludeGoalHit || fExcludeZeroSpend || todayFilter!=="all" || troubleOnly || fGroupsOnly;
 
   // Cross-view search awareness (the user): the banner only bridges the REAL divide — 📅 This Month
@@ -11569,7 +11614,9 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
           }
           {/* Note-2 flag — surfaces WHY a campaign (esp. an OFF one) isn't running: "no creatives",
               "no FB access", etc. (the user). Truncated with the full note on hover. */}
-          {c.note2&&c.note2.trim()&&<span title={c.note2.trim()} style={{fontSize:9,fontWeight:700,color:lightMode?"#b91c1c":"#fca5a5",background:lightMode?"#fee2e2":"#200808",border:`1px solid ${lightMode?"#fecaca":"#ef444455"}`,borderRadius:3,padding:"0px 5px",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:200,flexShrink:1}}>⚠ {c.note2.trim()}</span>}
+          {/* Note 2 badge removed from the pacing row (Austin 2026-11-09) — it's a setup/checklist note
+              (e.g. "Revert to standard set up 9/16", "Exposure"), not a pacing flag, and the red ⚠ made
+              fine, on-pace lines look flagged. Note 2 still shows on the Campaigns tab + edit form. */}
         </div>
       </div>
 
@@ -12520,8 +12567,13 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     const atRiskOf = r => !r.isOff && r.lp.pct < 1 && /Behind|Missed|short/i.test(r.lp.label);
     // Classify into the SAME sections as the monthly view: Behind / On Track / Ahead, plus an Off
     // section at the bottom for paused campaigns. Goal-hit/ended-at-goal fold into Ahead; Behind = at risk.
-    const lifeBucket = r => r.isOff ? "off" : (atRiskOf(r) ? "behind" : ((r.lp.pct >= 1 || /Ahead|Goal hit|at goal/i.test(r.lp.label)) ? "ahead" : "ontrack"));
+    // (Over-budget lines are NOT split out here — the normal view just sorts by pacing so the most-behind
+    // show first; over-budget surfaces via the 🚩 Trouble flag instead. Austin.)
+    // NO DATA leads: a line with zero cumulative delivery hasn't been synced/started spending yet, so it
+    // isn't really "behind" — it just needs eyes first (Austin: pin no-data to the TOP of the Spend view).
+    const lifeBucket = r => r.isOff ? "off" : ((r.delivered||0) <= 0 ? "nodata" : (atRiskOf(r) ? "behind" : ((r.lp.pct >= 1 || /Ahead|Goal hit|at goal/i.test(r.lp.label)) ? "ahead" : "ontrack")));
     // Counts reflect ALL goaled campaigns in view (the at-risk filter only changes which ROWS show).
+    const noDataCount  = withG.filter(r => lifeBucket(r)==="nodata").length;
     const behindCount  = withG.filter(r => lifeBucket(r)==="behind").length;
     const onTrackCount = withG.filter(r => lifeBucket(r)==="ontrack").length;
     const aheadCount   = withG.filter(r => lifeBucket(r)==="ahead").length;
@@ -12531,7 +12583,11 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     // campaign's own metrics — so the ✈ Flights list sorts by the exact same options as the monthly table.
     const _dir = sortDir==="asc" ? 1 : -1;
     const numOf = (r,k) =>
-      k==="pacing" ? (r.lp.pct||0)
+      // Pacing sorts by PACE RATIO (delivered ÷ expected-to-date), not raw % of goal — so the WORST
+      // pacers rise to the top of their section. A line at 1% delivered but only 19% into its flight
+      // (ratio .05) is further behind than one at 51% delivered 77% in (ratio .66); sorting by raw %
+      // wrongly buried the .05 line below the .66 line (Austin: "way lower pacing ones sit in the middle").
+      k==="pacing" ? ((r.lp && r.lp.expected>0) ? (r.lp.delivered/r.lp.expected) : (r.lp?.pct||0))
     : k==="impr"   ? (r.delivered||0)
     : k==="ctr"    ? (parseFloat(r.c.ctr)||0)
     : k==="cpm"    ? (parseFloat(r.c.cpm)||0)
@@ -12560,6 +12616,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
         <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",marginBottom:6,fontSize:11,color:lmTxtS}}>
           <span style={{fontWeight:700,color:lmTxt}}>✈ {withG.length} flight{withG.length!==1?"s":""}</span>
           <span style={{color:lmBrd}}>·</span>
+          {noDataCount>0 && <span><span style={{color:lmC("#94a3b8"),fontWeight:700}}>●</span> {noDataCount} no data</span>}
           <span><span style={{color:lmC("#fde047"),fontWeight:700}}>●</span> {behindCount} behind</span>
           <span><span style={{color:"#00d48a",fontWeight:700}}>●</span> {onTrackCount} on track</span>
           <span><span style={{color:lmC("#f97316"),fontWeight:700}}>●</span> {aheadCount} ahead</span>
@@ -12576,12 +12633,13 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
             No contracts to show yet. Flight pacing covers campaigns that <b>started June 1, 2026 or later</b> and have a total <b>Budget</b> — add a budget like <code>$10.2K</code> or <code>$45K</code> plus Start &amp; End dates in Add/Edit campaign.
           </div>
         ) : (()=>{
-          // Group the sorted rows into the monthly-style status sections: Behind / On Track / Ahead.
+          // Group the sorted rows into the monthly-style status sections: No Data / Behind / On Track / Ahead.
           const buckets = [
-            { key:"behind",  label:"Behind",   color:"#fde047", rows: rows.filter(r=>lifeBucket(r)==="behind") },
-            { key:"ontrack", label:"On Track", color:"#00d48a", rows: rows.filter(r=>lifeBucket(r)==="ontrack") },
-            { key:"ahead",   label:"Ahead",    color:"#f97316", rows: rows.filter(r=>lifeBucket(r)==="ahead") },
-            { key:"off",     label:"Off",      color:"#f87171", tint:true, rows: rows.filter(r=>lifeBucket(r)==="off") },
+            { key:"nodata",  label:"No Data",     color:"#94a3b8", rows: rows.filter(r=>lifeBucket(r)==="nodata") },
+            { key:"behind",  label:"Behind",      color:"#fde047", rows: rows.filter(r=>lifeBucket(r)==="behind") },
+            { key:"ontrack", label:"On Track",    color:"#00d48a", rows: rows.filter(r=>lifeBucket(r)==="ontrack") },
+            { key:"ahead",   label:"Ahead",       color:"#f97316", rows: rows.filter(r=>lifeBucket(r)==="ahead") },
+            { key:"off",     label:"Off",         color:"#f87171", tint:true, rows: rows.filter(r=>lifeBucket(r)==="off") },
           ];
           // Render flights through the SAME TableHeader + TableRow as This Month (the user: identical columns
           // + bar spacing) — just fed FLIGHT-basis data: cumulative delivered (prior+live) as the metric,
@@ -12626,10 +12684,22 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
               u.lp=computeLifetimePacing(synth,delivered,goalNum)||{pct:goalNum>0?delivered/goalNum:0,color:"#bfe3da",label:"",expected:0,timeFrac:null,delivered,goal:goalNum,unit:"$",metricKind:"spend",hasDates:!!(starts[0]&&ends.length),daysLeft:null,ended:false};
               u.delivered=delivered; u.goalNum=goalNum; u.isOff=m.every(x=>x.isOff);
             });
-            const uBucket = u => u.isOff ? "off" : ((u.lp.pct<1 && /Behind|Missed|short/i.test(u.lp.label||"")) ? "behind" : ((u.lp.pct>=1 || /Ahead|Goal hit|at goal/i.test(u.lp.label||"")) ? "ahead" : "ontrack"));
-            // "Groups only" toggle — drop the standalone (ungrouped) lines so just the pacing groups show.
-            const vUnits = fGroupsOnly ? units.filter(u=>u.type==="group") : units;
+            const uBucket = u => u.isOff ? "off" : ((u.delivered||0)<=0 ? "nodata" : ((u.lp.pct<1 && /Behind|Missed|short/i.test(u.lp.label||"")) ? "behind" : ((u.lp.pct>=1 || /Ahead|Goal hit|at goal/i.test(u.lp.label||"")) ? "ahead" : "ontrack")));
+            // "Groups only" button is tri-state: "only" = just the pacing groups (hide standalone lines),
+            // "exclude" = just the standalone lines (hide groups — easier to read when both get noisy), else all.
+            const vUnits = fGroupsOnly==="only" ? units.filter(u=>u.type==="group")
+                         : fGroupsOnly==="exclude" ? units.filter(u=>u.type!=="group")
+                         : units.slice();
+            // Order GROUPS + singles against each other by the group's OWN pace ratio (worst first) when
+            // sorting by Pacing — otherwise groups rendered in first-member order, so a more-behind group
+            // could sit below a less-behind one (Austin: worst-in-the-middle, at the group level). Other
+            // sort keys keep the rows-order the flat sort already produced.
+            if(sortKey==="pacing"){
+              const upr = u => (u.lp && u.lp.expected>0) ? (u.delivered/u.lp.expected) : (u.lp?.pct||0);
+              vUnits.sort((a,b)=> _dir * (upr(a)-upr(b)));
+            }
             const uBuckets = [
+              {key:"nodata",label:"No Data",color:"#94a3b8",units:vUnits.filter(u=>uBucket(u)==="nodata")},
               {key:"behind",label:"Behind",color:"#fde047",units:vUnits.filter(u=>uBucket(u)==="behind")},
               {key:"ontrack",label:"On Track",color:"#00d48a",units:vUnits.filter(u=>uBucket(u)==="ontrack")},
               {key:"ahead",label:"Ahead",color:"#f97316",units:vUnits.filter(u=>uBucket(u)==="ahead")},
@@ -12639,13 +12709,23 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
             const GACC = "#00d9ff";
             const renderGroupHeader = (u) => {
               const lp=u.lp, col=lmC(lp.color), open=!groupCollapsed.has(u.key);
+              // How much of the GROUP is actually in trouble — so Austin can tell "the whole group is behind"
+              // from "just one line drags the rollup." Count member lines that are individually at-risk.
+              const memAtRisk=u.members.filter(m=>atRiskOf(m)).length, memTot=u.members.length;
+              const _allBehind=memAtRisk>0&&memAtRisk===memTot;
+              const _trCol=_allBehind?"#ef4444":"#f59e0b";
               const expPct=lp.timeFrac!=null?Math.min(100,lp.timeFrac*100):null;
               const dailyBudSum=u.members.reduce((s,x)=>s+(parseFloat(x.c.tvsciDailyBudget)||0),0);
               const yestSum=u.members.reduce((s,x)=>s+(parseFloat(x.c.tvsciYesterdaySpend)||0),0);
               const remaining=Math.max(0,(u.goalNum||0)-(u.delivered||0));
               const dLeft=(lp.daysLeft!=null&&lp.daysLeft>0)?lp.daysLeft:null;
               const npd=(dLeft&&u.goalNum>0)?Math.round(remaining/Math.max(1,dLeft-1)):null;
-              const capped=dailyBudSum>0&&npd!=null&&npd>dailyBudSum*1.15;
+              // Capped = the combined daily cap can't land the group at ~95% of its goal (same stricter
+              // test as the per-line Trouble flag), AND it's actionable — ≤30d left or badly under (<80%
+              // final). No longer reds-out a group that's just a little behind or that lands 96–98%.
+              const _grpMaxPoss=dailyBudSum*Math.max(1,(dLeft||0)-1);
+              const _grpFinalPct=u.goalNum>0?((u.delivered||0)+_grpMaxPoss)/u.goalNum:1;
+              const capped=dailyBudSum>0&&dLeft!=null&&u.goalNum>0&&_grpFinalPct<0.95&&((dLeft<=30)||(_grpFinalPct<0.80));
               const gap=(u.goalNum>0&&lp.expected!=null)?(u.delivered-lp.expected):null;
               const gapCol=gap==null?lmTxtS:(gap>=0?lmC("#00d48a"):lmC("#f59e0b"));
               const yPct=dailyBudSum>0?(yestSum/dailyBudSum)*100:null;
@@ -12657,6 +12737,8 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
                     <button onClick={()=>toggleGroup(u.key)} style={{background:"none",border:"none",padding:0,cursor:"pointer",color:GACC,fontSize:12,fontWeight:700,flexShrink:0,transform:open?"rotate(90deg)":"none",transition:"transform .15s"}}>▸</button>
                     <span style={{fontSize:15,fontWeight:800,color:lightMode?"#0b3a46":"#d6f6ff",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}} title={u.key}>{u.key}</span>
                     <span style={{flexShrink:0,fontSize:9,fontWeight:700,color:GACC,background:GACC+(lightMode?"18":"26"),border:`1px solid ${GACC}55`,borderRadius:3,padding:"0 5px"}}>{u.members.length} lines</span>
+                    {memAtRisk>0 && <span title={_allBehind?`All ${memTot} lines in this group are pacing behind — the whole group is in trouble.`:`${memAtRisk} of ${memTot} lines are pacing behind — the rest are on pace. Expand to see which.`}
+                      style={{flexShrink:0,fontSize:9,fontWeight:800,color:lmC(_trCol),background:_trCol+(lightMode?"18":"26"),border:`1px solid ${_trCol}66`,borderRadius:3,padding:"0 5px",whiteSpace:"nowrap"}}>⚠ {memTot===1?"":_allBehind?`all ${memTot} `:`${memAtRisk}/${memTot} `}behind</span>}
                   </div>
                   <div><span style={{fontSize:9,fontWeight:800,color:GACC,letterSpacing:"0.04em"}}>GROUP</span></div>
                   <div>
@@ -12699,7 +12781,12 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
                       ? <TableRow key={u.row.c.id} {...flightRowProps(u.row)}/>
                       : (<React.Fragment key={"grp:"+u.key}>
                           {renderGroupHeader(u)}
-                          {!groupCollapsed.has(u.key) && u.members.map(m => <TableRow key={m.c.id} {...flightRowProps(m)} groupMember={true}/>)}
+                          {!groupCollapsed.has(u.key) && u.members.slice().sort((a,b)=>{
+                            // Worst pacer first within the group (pace ratio = delivered ÷ expected), so the
+                            // line dragging the rollup sits at the TOP instead of buried mid-group (Austin).
+                            const pr=x=>(x.lp&&x.lp.expected>0)?(x.lp.delivered/x.lp.expected):(x.lp?.pct||0);
+                            return pr(a)-pr(b);
+                          }).map(m => <TableRow key={m.c.id} {...flightRowProps(m)} groupMember={true}/>)}
                         </React.Fragment>)
                     )}
                   </div>
@@ -12925,8 +13012,9 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   return <div style={{color:lmTxt,maxWidth:1920,margin:"0 auto",background:lightMode?"#eaf5f1":"transparent",minHeight:lightMode?"100vh":"auto",padding:lightMode?"0 0 24px 0":"0"}}>
     {/* Header */}
     <div style={{marginBottom:14}}>
-      <div style={{fontSize:15,fontWeight:800,color:lmTxt,marginBottom:2}}>📈 Pacing Dashboard</div>
-      <div style={{fontSize:11,color:lmTxtS}}>{allActive.length} active · {withGoal.length} with goals{anyFilter?" · filtered":""}</div>
+      <div style={{fontSize:15,fontWeight:800,color:lmTxt}}>📈 Pacing Dashboard</div>
+      {/* Count lives in one place now — the "Showing X of Y · Clear filters" line above the table (Austin:
+          no duplicate campaign-count displays). */}
     </div>
 
     {/* Un-closed-month notice — pacing stays anchored to last month until you close it (see
@@ -13162,24 +13250,17 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
         🚩 Trouble
         {troubleCount>0 && <span style={{background:troubleOnly?"#ef4444":(lightMode?"#fee2e2":"#3a0010"),color:troubleOnly?"#fff":(lightMode?"#dc2626":"#fca5a5"),borderRadius:9,padding:"0 6px",fontSize:10,fontWeight:800}}>{troubleCount}</span>}
       </button>
-      {/* Trouble flags are view-scoped automatically: money/pacing on 💲 Spend, +delivery-quality on 📊 Metrics.
-          A small hint tells the user which set they're seeing (no manual toggle). */}
-      {troubleOnly && (
-        <span title={pacingView==="spend"
-          ? "Spend view: showing money + pacing flags (paused-but-spending, over budget, not spending, ending soon, stale, capped, pacing). Switch to 📊 Metrics for delivery-quality flags."
-          : "Metrics view: showing money/pacing flags PLUS delivery-quality (CTR / CPM / completion / frequency / went-dark / hit-goal early). The 💲 Spend tab shows money signals only."}
-          style={{display:"flex",alignItems:"center",gap:5,padding:"6px 10px",borderRadius:7,whiteSpace:"nowrap",fontSize:10.5,fontWeight:600,flexShrink:0,
-            background:lmBgInp, border:`1px solid ${lmBrd}`, color:lmTxtS}}>
-          {pacingView==="spend" ? "🎚 Spend flags" : "🎚 + Quality flags"}
-        </span>
+      {/* Trouble flags are still view-scoped automatically (money/pacing on 💲 Spend, +delivery-quality on
+          📊 Metrics) — the cryptic "🎚 Spend flags / + Quality flags" hint chip was removed as clutter (Austin). */}
+      {/* Last update — most recent check-in (metrics) date. Hidden on the 💲 Spend view, which shows the
+          "🔄 Synced" spend-sync time instead — no need for two freshness chips at once (Austin). */}
+      {pacingView!=="spend" && (
+        <div title="Most recent check-in date across all campaigns"
+          style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:7,border:"1px solid "+lmBrd,background:lmBgInp,fontSize:11.5,whiteSpace:"nowrap",flexShrink:0}}>
+          <span style={{color:lmTxtS}}>Last update</span>
+          <span style={{color:lightMode?"#2563eb":"#38bdf8",fontWeight:700}}>{lastUpdateDisp}</span>
+        </div>
       )}
-      {/* Last update — read-only chip showing the most recent check-in date,
-          with the date itself in electric blue. */}
-      <div title="Most recent check-in date across all campaigns"
-        style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:7,border:"1px solid "+lmBrd,background:lmBgInp,fontSize:11.5,whiteSpace:"nowrap",flexShrink:0}}>
-        <span style={{color:lmTxtS}}>Last update</span>
-        <span style={{color:lightMode?"#2563eb":"#38bdf8",fontWeight:700}}>{lastUpdateDisp}</span>
-      </div>
       {(<React.Fragment>
       {/* Overlays + Sort now show on BOTH This Month AND ✈ Flights (the user). The month Sort's keys
           (Pacing/Impr/CTR/CPM/Spend/End date/Platform/Partner/Name) apply to the flight rows too. */}
@@ -13249,15 +13330,15 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       </button>
       {/* Groups only — 💲 Spend view + 📊 Metrics ✈ Flights: show just the pacing groups (hide standalone lines). */}
       {(pacingView==="spend"||pacingView==="lifetime") && campaigns.some(c=>(c.pacingGroup||"").trim()) && (
-        <button onClick={()=>setFGroupsOnly(v=>!v)}
-          title="Show only pacing groups — hides standalone lines (Premium RT, TradeDesk, etc.)"
+        <button onClick={()=>setFGroupsOnly(v=> v==="only" ? "exclude" : v==="exclude" ? "" : "only")}
+          title={fGroupsOnly==="only" ? "Showing only pacing groups — click to show only standalone lines" : fGroupsOnly==="exclude" ? "Showing only standalone lines (groups hidden) — click to show all" : "Click once for groups only, again to hide groups (show only standalone lines)"}
           style={{display:"flex",alignItems:"center",gap:5,flexShrink:0,whiteSpace:"nowrap",transition:"all .15s",
             background:lightMode?(fGroupsOnly?"#e0f7ff":"#f3f7f7"):(fGroupsOnly?"#06222b":"#0b2522"),
             border:`1px solid ${fGroupsOnly?"#00d9ff":(lightMode?"#b6dccf":"#182f2c")}`,
             borderRadius:7,padding:"6px 12px",
             color:fGroupsOnly?(lightMode?"#0b3a46":"#7fe8ff"):(lightMode?"#527a75":"#d1ece5"),
             fontSize:11.5,fontWeight:fGroupsOnly?700:400,cursor:"pointer"}}>
-          {fGroupsOnly?"◉ Groups only":"◎ Groups only"}
+          {fGroupsOnly==="only" ? "◉ Groups only" : fGroupsOnly==="exclude" ? "⦸ Groups hidden" : "◎ Groups only"}
         </button>
       )}
       </div>
@@ -13284,7 +13365,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       {/* Include the Off section's shown rows in the count when Trouble/crack-focus is on — otherwise a
           paused-but-spending focus reads "0" while its campaign sits visible in the Off section. */}
       <span style={{fontSize:11,color:lmTxtS}}>Showing {filtered.length + (troubleOnly ? offFiltered.length : 0)} of {allActive.length + (troubleOnly ? offRows.length : 0)}</span>
-      <button onClick={()=>{setSearch("");setSearchTerms([]);setFPartner("all");setFPlatforms(new Set());setFStatuses(new Set());setFExcludeGoalHit(false);setFExcludeZeroSpend(false);setTodayFilter("all");setTroubleOnly(false);clearReasonFilters();setFGroupsOnly(false);}} style={{background:"none",border:"1px solid "+lmBrd,borderRadius:5,padding:"2px 8px",color:lmTxtM,fontSize:11,cursor:"pointer"}}>Clear filters</button>
+      <button onClick={()=>{setSearch("");setSearchTerms([]);setFPartner("all");setFPlatforms(new Set());setFStatuses(new Set());setFExcludeGoalHit(false);setFExcludeZeroSpend(false);setTodayFilter("all");setTroubleOnly(false);clearReasonFilters();setFGroupsOnly("");}} style={{background:"none",border:"1px solid "+lmBrd,borderRadius:5,padding:"2px 8px",color:lmTxtM,fontSize:11,cursor:"pointer"}}>Clear filters</button>
     </div>}
 
     {/* Cross-view search awareness (the user): your search also matches campaigns that live in the OTHER tab
@@ -13577,11 +13658,13 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
         sync so columns stay aligned. Only applied in table view — card view stays fully responsive. */}
     <div className={viewMode==="table"?"pacing-hscroll":undefined}>
     <div style={viewMode==="table"?{minWidth:1720}:undefined}>
-    {(behind.length||onTrack.length||ahead.length)>0 && (
+    {(behind.length||overBudget.length||onTrack.length||ahead.length)>0 && (
       /* overflow must NOT be hidden/auto here — an overflow!=visible ancestor becomes the sticky
          containing block and would break the sticky first column (it would scroll away, not pin). */
       <div style={{border:"1px solid "+lmBrd,borderRadius:9,overflow:"visible",background:lmBg,marginBottom:8}}>
         <TableHeader/>
+        {/* Over Budget leads in the Trouble triage list — overspend is where the 🚩 flag surfaces it. */}
+        <Section connected label="Over Budget" color="#ef4444" items={overBudget} forceOpen={troubleOnly} note="spent past the media budget — the overage docks the management fee"/>
         <Section connected label="Behind"   color="#fde047" items={behind}  forceOpen={troubleOnly}/>
         <Section connected label="On Track" color="#00d48a" items={onTrack} forceOpen={troubleOnly}/>
         <Section connected label="Ahead"    color="#f97316" items={ahead}   forceOpen={troubleOnly}/>
