@@ -9799,6 +9799,24 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   // clearTarget: when set, opens a confirmation modal for clearing a breakdown line.
   // Same shape as reassignTarget — { line, fromCampaignId, snapField, snapKey }
   const [clearTarget, setClearTarget] = useState(null);
+  // Which TVsci spend-report LINE(s) feed each campaign — read from the saved check-in mappings so the
+  // 💲 Spend expanded row can NAME what it's matched with (Austin: makes a wrong map easy to spot, e.g. an
+  // "Alvernia Grad" line sitting on the "Alvernia UG" campaign). Keyed campId → [file line names].
+  const tvsciSpendNamesByCamp = React.useMemo(()=>{
+    const m={};
+    // The mapping KEY is lowercased, so recover the ORIGINAL case: prefer the entry's stored csvName, else
+    // re-case from the cached spend report (which carries the true "Campaign Name"), else show the key.
+    const caseMap={};
+    try{ const csv=localStorage.getItem("tvsci-cached-csv")||""; if(csv){ parseCsvRows(csv).forEach(r=>{ const n=String(r["Campaign Name"]||"").trim(); if(n) caseMap[n.toLowerCase()]=n; }); } }catch{}
+    try{
+      const sm = JSON.parse(localStorage.getItem(CSV_MAPPINGS_KEY)||"{}");
+      Object.entries(sm).forEach(([k,v])=>{
+        if(!v || !v.campId) return;
+        if(k.startsWith("TVsci Spend||")){ const id=String(v.campId); const lc=k.slice("TVsci Spend||".length); (m[id]=m[id]||[]).push(v.csvName || caseMap[lc] || lc); }
+      });
+    }catch{}
+    return m;
+  }, [campaigns]);
   // offBannerOpen: whether the "off campaigns with data" banner is expanded
   // to show the full list with per-row activate buttons.
   const [offBannerOpen, setOffBannerOpen] = useState(false);
@@ -11621,7 +11639,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       </div>
 
       {/* Platform */}
-      <div><span style={{...vBadge(pCol),borderRadius:3,padding:"1px 5px",fontSize:10,fontWeight:700}}>{c.platform}</span></div>
+      <div title="Platform"><span style={{...vBadge(pCol),borderRadius:3,padding:"1px 5px",fontSize:10,fontWeight:700}}>{c.platform}</span></div>
 
       {/* Status column removed per the user (2026-07-17) — the pacing.label pill just repeated the
           section header (BEHIND / ON TRACK / AHEAD) and the coloured left border. Its still-useful
@@ -11629,7 +11647,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
           pacing-bar cell below, which already shows the % and sits right where the eye lands. */}
 
       {/* Monthly pacing bar — green/yellow/red fill, electric blue expected tick, exp% + goal badges below */}
-      <div>
+      <div title="Monthly pacing">
         {pacing?<>
           <div style={{position:"relative",background:lmBarTrk,borderRadius:4,height:10,overflow:"visible",marginBottom:2}}>
             <div style={{background:lmC(col),height:"100%",width:Math.min(100,pacing.pct*100)+"%",borderRadius:4}}/>
@@ -11652,7 +11670,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       </div>
 
       {/* Monthly Goal — impressions / views / spend goal, standalone (budget moved to its own column) */}
-      <div>
+      <div title="Goal">
         {monthlyGoal
           ? (()=>{
               // When pacing on a cross-month FLIGHT basis, show the whole-flight TOTAL goal (matches the
@@ -11661,7 +11679,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
               const _isFl = (pacing && pacing.flightBasis) || monthlyGoalIsFromFlight(c);
               const _g = (pacing && pacing.flightBasis && pacing.goal) ? pacing.goal : monthlyGoal;
               return <div style={{display:"flex",flexDirection:"column",gap:1,alignItems:"flex-start"}}>
-              <span style={{fontSize:11,fontWeight:700,color:"#00e5a0"}} title={pacing&&pacing.flightBasis?`Flight total ${_g.toLocaleString()} across ${fmtDate(c.startDate)}–${fmtDate(c.endDate)} — cumulative delivery (closed months + this month) vs this total`:(monthlyGoalIsFromFlight(c)?`This month's prorated share of the ${(parseGoalNumber(c.goal)||0).toLocaleString()} flight goal (${fmtDate(c.startDate)}–${fmtDate(c.endDate)}) — no monthly goal set`:`Exact goal: ${_g.toLocaleString()}`)}>
+              <span style={{fontSize:11,fontWeight:700,color:"#00e5a0"}} title={`Goal: ${_g.toLocaleString()}`}>
                 {metricKind==="spend"
                   ? "$"+(_g>=1000?(_g/1000).toFixed(1)+"k":_g.toFixed(0))
                   : _g>=1000000?(_g/1000000).toFixed(2)+"M":_g>=1000?(_g/1000).toFixed(1)+"K":String(_g)}
@@ -11672,10 +11690,9 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       </div>
 
       {/* Primary delivery metric — Views (YT), Spend (SEM), or Impressions */}
-      <div title={metricKind==="views" ? "Views delivered this period (MTD)" : metricKind==="spend" ? "Spend delivered this period (MTD)" : "Impressions delivered this period (MTD)"}>
+      <div title="Served / expected">
         {primaryFmt
-          ? <div style={{display:"flex",alignItems:"baseline",gap:3,flexWrap:"wrap"}}
-              title={expFmt?`Served ${primaryRaw.toLocaleString()} ${primaryLabel} vs ${exp.toLocaleString()} expected by today — ${primaryRaw>=exp?"ahead of":"behind"} pace.`:undefined}>
+          ? <div style={{display:"flex",alignItems:"baseline",gap:3,flexWrap:"wrap"}}>
               <span style={{fontSize:12,fontWeight:800,color:lightMode?"#0891b2":"#38bdf8",letterSpacing:"-0.01em"}}>{primaryFmt}</span>
               {expFmt && <span style={{fontSize:11,fontWeight:700,color:lightMode?"#0891b2":"#38bdf8"}}>/ {expFmt}</span>}
               <span style={{fontSize:9,color:lmTxtD}}>{primaryLabel}</span>
@@ -11702,9 +11719,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       </div>
 
       {/* Pace gap — delivered vs expected right now */}
-      <div title={paceGap !== null ? (metricKind==="spend"
-            ? `Expected $${exp?.toLocaleString()} · Delivered $${primaryRaw.toLocaleString(undefined,{maximumFractionDigits:0})}`
-            : `Expected ${exp?.toLocaleString()} · Delivered ${primaryRaw.toLocaleString()}`) : ""}>
+      <div title="Pace gap">
         {paceGapFmt
           ? <span style={{fontSize:11,fontWeight:700,color:lmC(paceGapCol)}}>{paceGapFmt}</span>
           : <span style={{fontSize:11,color:lmTxtD}}>—</span>}
@@ -11713,9 +11728,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       {/* Need/Day — impr/views/$ required per remaining day to hit goal. In the 💲 Spend view, a line whose
           Need/Day meaningfully exceeds its Daily Budget cap (see isCappedSpend) is structurally under-funded —
           flag it red + ⚠ so it jumps out on a scan; the tooltip says how far short it lands at the cap. */}
-      <div title={npd !== null
-          ? `${npdFmt} ${metricKind==="spend"?"spend":metricKind==="views"?"views":"impr"}/day to finish ~1 day early · ${npdDaysActual}d left${isCappedSpend?`\nCapped — needs ${npdFmt}/day but the daily budget is only ${_dbFmt}, so even at 100% of cap it finishes ~${cappedShortPct}% short of pace. Raise the daily budget to deliver the full flight.`:""}`
-          : ""}>
+      <div title="Need per day">
         {npdFmt
           ? <span style={{fontSize:11,fontWeight:isCappedSpend?800:700,color:isCappedSpend?lmC("#ef4444"):lmC(npdCol)}}>{npdFmt}</span>
           : <span style={{fontSize:11,color:lmTxtD}}>—</span>}
@@ -11748,9 +11761,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
         const baseCol = yest.pctOfNeeded == null ? (lightMode ? "#0284c7" : "#afcac7") : lmC(yest.color);
         const chip = { color: baseCol, background: baseCol + (lightMode ? "14" : "22"), border: "1px solid " + baseCol + (lightMode ? "33" : "45") };
         return (
-          <div style={{minWidth:0,overflow:"hidden"}} title={multiDay
-            ? `${fmtYmoney(yest.delivered)} over ${yest.gapDays} days (a check-in was skipped) = ${fmtYmoney(yest.deliveredPerDay)}/day · Needed/day: ${fmtYmoney(yest.neededPerDay)} · ${yest.status} (baseline ${fmtDate(yest.baseDate)} → ${fmtDate(today)})`
-            : `Yesterday: ${fmtYmoney(yest.delivered)} · Needed/day: ${fmtYmoney(yest.neededPerDay)} · ${yest.status} (baseline ${fmtDate(yest.baseDate)} → ${fmtDate(today)})`}>
+          <div style={{minWidth:0,overflow:"hidden"}} title="Yesterday delivered">
             <span style={{display:"inline-flex",alignItems:"baseline",gap:3,maxWidth:"100%",whiteSpace:"nowrap",fontSize:11,fontWeight:800,borderRadius:5,padding:"2px 6px",...chip}}>
               {fmtY}
               {multiDay&&<span title={`Averaged over ${yest.gapDays} days — a check-in was skipped`} style={{fontSize:8,fontWeight:700,opacity:.7}}>{yest.gapDays}d</span>}
@@ -11767,7 +11778,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
         // When the line is "capped" (Need/Day exceeds this budget by a meaningful margin), paint the budget
         // red too so the need-vs-cap mismatch reads at a glance across the two adjacent columns.
         return (
-          <div title={db>0 ? (isCappedSpend ? `Daily budget ${_dbFmt} — too low to finish: Need/Day is ~${cappedShortPct}% above this cap. Raise it to deliver the full flight.` : "Campaign daily budget (from the Ambio spend sync) — the per-day cap yesterday's spend is measured against") : "No daily budget synced yet — drop the Ambio Spend Report in Quick Check-in"}>
+          <div title="Daily budget">
             {db>0
               ? <span style={{fontSize:11,fontWeight:isCappedSpend?800:700,color:isCappedSpend?lmC("#ef4444"):lmC("#7dd3fc")}}>${db>=1000?(db/1000).toFixed(1)+"k":db.toFixed(0)}</span>
               : <span style={{fontSize:11,color:lmTxtD}}>—</span>}
@@ -11776,7 +11787,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       })()}
 
       {/* CTR or VCR — color-coded from benchmarks (hidden in the 💲 Spend view) */}
-      {!spendOnly && <div title={kpi?.tip||""}>
+      {!spendOnly && <div title="CTR / VCR">
         {isVCR && vcrDisp > 0
           ? <span style={{fontSize:11,fontWeight:700,color:lmC(vcrCol)}}>{vcrDisp.toFixed(0)}% VCR</span>
           : ctrDisp > 0
@@ -11785,7 +11796,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       </div>}
 
       {/* Clicks — actual count (hidden in the 💲 Spend view) */}
-      {!spendOnly && <div title="Total clicks this period (link clicks for Meta)">
+      {!spendOnly && <div title="Clicks">
         {clicksFmt
           ? <span style={{fontSize:11,fontWeight:700,color:"#c5d8d6"}}>{clicksFmt}</span>
           : <span style={{fontSize:11,color:lmTxtD}}>—</span>}
@@ -11798,7 +11809,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
         if(rate==="none") return <div><span style={{fontSize:11,color:lmTxtD}}>—</span></div>;
         if(rate==="CPV"){
           const cpv = viewsRaw>0 ? spend/viewsRaw : 0;
-          return <div title={cpv>0?`CPV (cost per view) = $${spend.toLocaleString(undefined,{maximumFractionDigits:0})} spend ÷ ${viewsRaw.toLocaleString()} views`:"CPV = spend ÷ views (needs both spend and views)"}>
+          return <div title="Cost per view">
             {cpv>0
               ? <span style={{fontSize:11,fontWeight:700,color:lmC(cpmColor(c.platform,cpv))}}>${cpv<0.1?cpv.toFixed(3):cpv.toFixed(2)}<span style={{fontSize:8,color:lmTxtD,fontWeight:400}}> cpv</span></span>
               : <span style={{fontSize:11,color:lmTxtD}}>—</span>}
@@ -11806,13 +11817,13 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
         }
         if(rate==="CPC"){
           const cpc = clicksRaw>0 ? spend/clicksRaw : 0;
-          return <div title={cpc>0?`CPC (cost per click) = $${spend.toLocaleString(undefined,{maximumFractionDigits:0})} spend ÷ ${clicksRaw.toLocaleString()} clicks`:"CPC = spend ÷ clicks (needs both spend and clicks)"}>
+          return <div title="Cost per click">
             {cpc>0
               ? <span style={{fontSize:11,fontWeight:700,color:lmC(cpmColor(c.platform,cpc))}}>${cpc.toFixed(2)}<span style={{fontSize:8,color:lmTxtD,fontWeight:400}}> cpc</span></span>
               : <span style={{fontSize:11,color:lmTxtD}}>—</span>}
           </div>;
         }
-        return <div title={cpmTip}>
+        return <div title="CPM">
           {cpm > 0
             ? <span style={{fontSize:11,fontWeight:700,color:lmC(cpmCol)}}>${cpm.toFixed(2)}</span>
             : <span style={{fontSize:11,color:lmTxtD}}>—</span>}
@@ -11825,7 +11836,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
         const totBudget = parseFloat(c.budget) || 0;   // explicit dollar budget only (not the impression Goal)
         const moRev = totBudget > 0 ? totBudget : calcMonthlyRevenue(c);
         return (
-          <div title={totBudget>0 ? "Total flight budget (committed spend)" : "Monthly budget / revenue for this campaign"}>
+          <div title="Flight budget">
             {moRev!=null
               ? <span style={{fontSize:11,fontWeight:700,color:lightMode?"#024744":"#00e19e"}}>
                   ${moRev>=1000?(moRev/1000).toFixed(1)+"k":moRev.toLocaleString("en-US",{maximumFractionDigits:0})}
@@ -11836,7 +11847,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       })()}
 
       {/* Frequency — color-coded: ≤2 green, ≤3.5 yellow, >3.5 red (hidden in the 💲 Spend view) */}
-      {!spendOnly && <div title="Frequency: avg times a user saw this ad">
+      {!spendOnly && <div title="Frequency">
         {freq > 0
           ? <span style={{fontSize:11,fontWeight:700,color:lmC(freqCol)}}>{freq.toFixed(2)}x</span>
           : <span style={{fontSize:11,color:lmTxtD}}>—</span>}
@@ -11891,6 +11902,17 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
           <div style={{fontSize:9,color:lightMode?"#789e99":"#bfe3da",textTransform:"uppercase",letterSpacing:"0.06em",fontWeight:700,marginBottom:7}}>
             📺 Ambio Spend Report{sync?` · synced ${fmtDate(sync)}${syncTime?` at ${syncTime}`:""}`:" · not synced yet"}
           </div>
+          {/* Name the spend-report LINE(S) this campaign is matched with — so a wrong mapping (e.g. the
+              "Alvernia Grad" line landing on the "Alvernia UG" campaign) is obvious at a glance (Austin). */}
+          {(()=>{ const nm = tvsciSpendNamesByCamp[String(c.id)] || [];
+            if(nm.length) return (
+              <div style={{marginBottom:9}}>
+                <div style={{fontSize:8.5,color:lightMode?"#789e99":"#8fb3ad",textTransform:"uppercase",letterSpacing:"0.05em",fontWeight:700}}>📄 Mapped from</div>
+                <div style={{fontSize:13,fontWeight:700,color:lightMode?"#0f2e2a":"#e3edec",wordBreak:"break-word"}}>{nm.join("  ·  ")}</div>
+              </div>
+            );
+            return life>0 ? <div style={{fontSize:10,color:lightMode?"#97bab6":"#6f8c88",marginBottom:8,fontStyle:"italic"}}>No source line on file.</div> : null;
+          })()}
           <div style={{display:"flex",flexWrap:"wrap",gap:24,alignItems:"flex-end"}}>
             <Stat label="Lifetime spend" val={money(life)}/>
             <Stat label="Daily budget"  val={daily>0?money(daily):"—"}/>
@@ -17114,6 +17136,26 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
   // very top; then "known" rows (remembered ✓ or exact 100%); then unmapped last. Within a tier, the
   // file's own order is preserved. Rendering keeps each row's ORIGINAL index for all state lookups.
   const [rowOrder,     setRowOrder]     = React.useState(null);   // [origIdx, …] or null (= file order)
+  const [ambiguousMatch, setAmbiguousMatch] = React.useState({}); // fileRowIdx -> {base,count,program} for a multi-program-client auto-match (confirm it's the right program)
+  // Flag auto-matches onto a client that runs MULTIPLE sub-programs (Alvernia University UG / MBA / Grad &
+  // Adult, SUNY Brockport Undergrad / Transfer / Graduate …) — the fuzzy match can silently pick the WRONG
+  // program, a mistake that's easy to miss at scale (Austin: "10 Alvernia campaigns, UG vs Graduate could
+  // easily be mapped wrong"). Returns {rowIdx:{base,count,program}} and nudges those rows below the review
+  // threshold so they surface for a quick confirm. Remembered/exact matches are an explicit choice — untouched.
+  function flagAmbiguousMatches(mp, conf, mem){
+    const sub  = nm => { const s=String(nm||""); const i=s.lastIndexOf(" - "); return (i>0?s.slice(0,i):s).trim(); };
+    const base = nm => sub(nm).replace(/\s*\([^()]*\)\s*$/,"").trim();
+    const progs = {};
+    activeCamps.forEach(c=>{ const b=base(c.campaignName); if(!b) return; (progs[b]=progs[b]||new Set()).add(sub(c.campaignName)); });
+    const out={};
+    Object.keys(mp).forEach(k=>{
+      const id=mp[k]; if(!id || mem[k] || (conf[k]!=null && conf[k]>=1.0)) return;   // skip unmapped / remembered / exact
+      const camp=fullPool.find(c=>String(c.id)===String(id)); if(!camp) return;
+      const b=base(camp.campaignName); const set=progs[b];
+      if(set && set.size>1){ out[k]={ base:b, count:set.size, program:sub(camp.campaignName) }; if(conf[k]==null || conf[k]>0.69) conf[k]=0.69; }
+    });
+    return out;
+  }
   function computeRowOrder(rows, mp, conf, mem){
     if(!Array.isArray(rows)) return null;
     // Needs-attention first: the rows a human still has to deal with float to the TOP so they're never
@@ -18071,7 +18113,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
       const next={...prev};
       mappingEntries.forEach(({csvName,campId,campName,advertiserName,accountName})=>{
         if(!campId) return;
-        const payload={campId,campName,source,learnedAt:getToday()};
+        const payload={campId,campName,source,csvName,learnedAt:getToday()};   // keep the ORIGINAL-case file name (the key is lowercased) so UIs can show it properly
         if(source==="TradeDesk" && advertiserName){
           // Compound key: adv + TTD campaign name — one slot per row, never collides across
           // multiple tracker campaigns that share the same TTD advertiser.
@@ -18846,6 +18888,8 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
     Object.keys(initMap).forEach(k => {
       if(initMap[k] && !memMap[k] && idCounts[initMap[k]] > 1 && initConf[k] > 0.5) initConf[k] = 0.5;
     });
+    // AMBIGUITY GUARD — surface auto-matches onto multi-program clients for a confirm (see flagAmbiguousMatches).
+    setAmbiguousMatch(flagAmbiguousMatches(initMap, initConf, memMap));
 
     const totalMatched=Object.values(initMap).filter(Boolean).length;
     setFileRows(rows);
@@ -19673,6 +19717,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
                         if(bId){reMap[i]=bId;reConf[i]=bSc;autoC++;}
                       }
                     });
+                    setAmbiguousMatch(flagAmbiguousMatches(reMap, reConf, {}));   // re-flag multi-program-client matches
                     setMapping(reMap); setMatchConf(reConf); setMemoryMap({});
                     // Re-sort the review list on the FRESH matches — otherwise rows keep the pre-reset order
                     // (file/alphabetical) and the fuzzy scores look unsorted (Austin). Weakest match floats up.
@@ -19864,7 +19909,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
                             {isUnmatched?"⚠ ":""}{displayName||"—"}
                             {fileSource==="TradeDesk"&&name&&<span style={{fontSize:9,color:_lm?"#97bab6":"#8fbfb6",marginLeft:6}}>({name})</span>}
                           </div>
-                          {isLowConf&&(
+                          {isLowConf&&!ambiguousMatch[i]&&(
                             <span title={`Low-confidence auto-match (${Math.round(rowConf*100)}%) — verify this is correct before applying`}
                               style={{fontSize:9,color:"#f59e0b",background:_lm?"#fffbeb":"#1a0e00",border:"1px solid #f59e0b50",borderRadius:3,padding:"0 4px",whiteSpace:"nowrap",flexShrink:0}}>
                               ⚠ {Math.round(rowConf*100)}%
@@ -19883,6 +19928,10 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
                           {wasMoved&&(
                             <span title="You MOVED metrics onto this campaign before — double-check this is the right one so you don't have to re-move it."
                               style={{fontSize:9,fontWeight:800,color:_lm?"#0891b2":"#00d9ff",background:_lm?"#ecfeff":"#04222b",border:`1px solid ${_lm?"#67e8f9":"#00d9ff40"}`,borderRadius:3,padding:"0 4px",whiteSpace:"nowrap",flexShrink:0}}>↪ moved</span>
+                          )}
+                          {ambiguousMatch[i]&&(
+                            <span title={`"${ambiguousMatch[i].base}" runs ${ambiguousMatch[i].count} separate programs (e.g. Undergrad vs Graduate) — make sure this landed on the right one (${ambiguousMatch[i].program}), not another.`}
+                              style={{fontSize:9,fontWeight:800,color:_lm?"#b45309":"#fbbf24",background:_lm?"#fffbeb":"#1f1400",border:`1px solid ${_lm?"#fcd34d":"#f59e0b55"}`,borderRadius:3,padding:"0 4px",whiteSpace:"nowrap",flexShrink:0}}>⚠ confirm program ({ambiguousMatch[i].count})</span>
                           )}
                         </div>
                         <div style={{fontSize:9,color:_lm?"#97bab6":"#8fbfb6",marginTop:1,display:"flex",gap:8}}>
