@@ -11897,6 +11897,15 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
             <Stat label="Yesterday"     val={pct!=null?`${money(yest)} · ${Math.round(pct*100)}% of budget`:money(yest)} color={yCol}/>
             <Stat label="Today so far"  val={money(today)}/>
           </div>
+          {/* Mis-mapped spend? Move it to the correct campaign — this also repoints the saved mapping so the
+              auto-sync + next check-in route there too (no per-line snapshot for spend, so this is the fix). */}
+          {life>0 && (
+            <button onClick={()=>setReassignTarget({ isTvsciSpend:true, fromCampaignId:c.id, snapField:"tvsciSpend", snapKey:null, line:{ name:"TVsci spend", impressions:0, spend:life } })}
+              title="Mapped to the wrong campaign? Move this TVsci spend to the correct one — the saved mapping updates too, so future syncs and check-ins follow."
+              style={{marginTop:10,background:"none",border:`1px solid ${lightMode?"#b6dccf":"#274642"}`,borderRadius:5,color:lightMode?"#527a75":"#d1ece5",fontSize:11,padding:"4px 10px",cursor:"pointer",fontWeight:600}}>
+              ↪ Move spend to another campaign
+            </button>
+          )}
         </div>
       );
     })()}
@@ -13880,6 +13889,7 @@ function ReassignLineModal({ target, campaigns, lightMode, onCancel, onConfirm }
     dspSnapshots:    ["DSP"],
     googleSnapshots: ["SEM","YT"],
     snapSnapshots:   ["SP"],
+    tvsciSpend:      ["PTV","DRT","VRT","PVRT","CTV","OTT"], // Ambio TVsci spend-report move (no per-line snapshot)
   };
   const allowedPlatforms = SOURCE_PLATFORMS[target.snapField] || [];
   const fromCamp = campaigns.find(c => c.id === target.fromCampaignId);
@@ -16923,6 +16933,70 @@ function InitialsPrompt({ current, onSave, onClose }){
   );
 }
 
+// Searchable campaign picker for Quick Check-in rows (Austin: "when I search Alvernia I need to only see
+// the Alvernia campaigns"). Replaces the native <select> — whose type-ahead can't filter — with a button
+// that opens a portal'd dropdown carrying its OWN search box. Empty search shows the smart candidates
+// (`options`); once you type, it searches the broader on-platform pool (`searchOptions`) so every matching
+// campaign (incl. archived) is reachable. Portal + fixed position so a scroll container can't clip it.
+function CampaignPicker({ value, options, searchOptions, archivedIds, onPick, onIgnore, lm, isUnmatched }){
+  const _lm = lm;
+  const [open, setOpen] = React.useState(false);
+  const [q, setQ] = React.useState("");
+  const [rect, setRect] = React.useState(null);
+  const btnRef = React.useRef(null), panelRef = React.useRef(null);
+  const assigned = React.useMemo(()=>{
+    if(!value) return null;
+    return [...(options||[]), ...(searchOptions||[])].find(c=>String(c.id)===String(value)) || null;
+  }, [value, options, searchOptions]);
+  const doOpen = ()=>{ const el=btnRef.current; if(el) setRect(el.getBoundingClientRect()); setQ(""); setOpen(true); };
+  React.useEffect(()=>{
+    if(!open) return;
+    const inside = (el)=> (btnRef.current&&btnRef.current.contains(el)) || (panelRef.current&&panelRef.current.contains(el));
+    const onDoc = e=>{ if(!inside(e.target)) setOpen(false); };
+    const onKey = e=>{ if(e.key==="Escape") setOpen(false); };
+    const onScroll = e=>{ const t=e.target; if(t&&t.nodeType&&panelRef.current&&panelRef.current.contains(t)) return; setOpen(false); }; // row-list scroll closes; inner list scroll doesn't (resize target is window, not a Node)
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onScroll);
+    return ()=>{ document.removeEventListener("mousedown", onDoc); document.removeEventListener("keydown", onKey); window.removeEventListener("scroll", onScroll, true); window.removeEventListener("resize", onScroll); };
+  }, [open]);
+  const qq = q.trim().toLowerCase();
+  const base = qq ? ((searchOptions && searchOptions.length) ? searchOptions : options) : options;
+  const list = (base||[]).filter(c=> !qq || c.campaignName.toLowerCase().includes(qq) || String(c.platform||"").toLowerCase().includes(qq) || String(c.mediaPartner||"").toLowerCase().includes(qq));
+  const labelTxt = assigned ? `${assigned.campaignName.trim()} · ${assigned.platform} · ${assigned.mediaPartner}` : "— leave unassigned —";
+  const bg = value?(_lm?"#ddf2ea":"#002e24"):isUnmatched?(_lm?"#fffbeb":"#1a0e00"):(_lm?"#e8f4ef":"#0b2522");
+  const bd = value?(_lm?"#00c896":"#00c89640"):isUnmatched?"#f59e0b40":(_lm?"#c4e0d8":"#182f2c");
+  const fg = value?(_lm?"#024744":"#00e5a0"):isUnmatched?"#f59e0b":(_lm?"#789e99":"#bfe3da");
+  const optSt = { padding:"6px 9px", fontSize:12, cursor:"pointer", borderBottom:`1px solid ${_lm?"#eef4f2":"#102a26"}`, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" };
+  const panel = (open && rect) ? ReactDOM.createPortal(
+    <div ref={panelRef} style={{position:"fixed", zIndex:9999, top:Math.round(rect.bottom+2), left:Math.round(rect.left), width:Math.round(Math.max(rect.width, 340)), maxHeight:320, background:_lm?"#ffffff":"#07211c", border:`1px solid ${_lm?"#c4e0d8":"#1d3a35"}`, borderRadius:7, boxShadow:"0 10px 30px rgba(0,0,0,0.45)", display:"flex", flexDirection:"column", overflow:"hidden"}}>
+      <input autoFocus value={q} onChange={e=>setQ(e.target.value)} placeholder="Type to filter campaigns…"
+        onKeyDown={e=>{ if(e.key==="Enter"&&list.length===1){ onPick(String(list[0].id)); setOpen(false); } }}
+        style={{border:"none", borderBottom:`1px solid ${_lm?"#c4e0d8":"#1d3a35"}`, background:_lm?"#f3f7f7":"#0b2522", color:_lm?"#0f172a":"#e6f3f0", fontSize:12, padding:"8px 10px", outline:"none"}}/>
+      <div style={{overflowY:"auto"}}>
+        <div onClick={()=>{ onPick(""); setOpen(false); }} style={{...optSt, color:_lm?"#789e99":"#8fbfb6"}}>— leave unassigned —</div>
+        <div onClick={()=>{ onIgnore(); setOpen(false); }} style={{...optSt, color:"#ef4444", fontWeight:600}}>🚫 Ignore this campaign</div>
+        {list.length===0 && <div style={{padding:"9px 10px", fontSize:11, color:_lm?"#789e99":"#8fbfb6"}}>No matches{qq?` for “${q.trim()}”`:""}</div>}
+        {list.slice(0,300).map(c=>{ const sel=String(c.id)===String(value); return (
+          <div key={c.id} onClick={()=>{ onPick(String(c.id)); setOpen(false); }}
+            style={{...optSt, background:sel?(_lm?"#ddf2ea":"#09322a"):"transparent", color:sel?(_lm?"#024744":"#00e5a0"):(_lm?"#0f172a":"#d6ece7"), fontWeight:sel?700:400}}>
+            {c.campaignName.trim()} <span style={{opacity:0.62}}>· {c.platform} · {c.mediaPartner}{archivedIds&&archivedIds.has(String(c.id))?" · (archived)":""}</span>
+          </div>); })}
+      </div>
+    </div>, document.body) : null;
+  return (
+    <div style={{width:"100%"}}>
+      <button type="button" ref={btnRef} onClick={()=> open ? setOpen(false) : doOpen()}
+        style={{background:bg, border:`1px solid ${bd}`, borderRadius:5, padding:"4px 7px", color:fg, fontSize:12, outline:"none", cursor:"pointer", width:"100%", textAlign:"left", display:"flex", alignItems:"center", gap:6}}>
+        <span style={{flex:1, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{labelTxt}</span>
+        <span style={{opacity:0.6, fontSize:10}}>▾</span>
+      </button>
+      {panel}
+    </div>
+  );
+}
+
 function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampaigns, onClose, autoLoadFile=null, onAutoLoadConsumed=()=>{} }) {
   // autoLoadFile: a File handed in by the email-inbox flow — processed once through the normal drop
   // handler (so it goes through the same review/apply gate), then reported consumed to the parent.
@@ -17141,7 +17215,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
               .filter(e=> e && e.name);
     } catch{ return []; }
   });
-  const _persistIgnored = (arr)=>{ try{ localStorage.setItem(QCI_IGNORE_KEY, JSON.stringify(arr)); }catch{} };
+  const _persistIgnored = (arr)=>{ try{ localStorage.setItem(QCI_IGNORE_KEY, JSON.stringify(arr)); }catch{} try{ window.dispatchEvent(new Event("qci-ignored-changed")); }catch{} };
   const isIgnoredName = (name)=> !!name && ignoredNames.some(e=>normIgnore(e.name)===normIgnore(name));
   const addIgnore = (name)=>{ const nm=String(name||"").trim(); if(!nm) return; const now=Date.now(); setIgnoredNames(prev=>{ if(prev.some(e=>normIgnore(e.name)===normIgnore(nm))) return prev; const next=[...prev,{name:nm,addedAt:now,lastSeenAt:now}]; _persistIgnored(next); return next; }); };
   const removeIgnore = (name)=> setIgnoredNames(prev=>{ const next=prev.filter(e=>normIgnore(e.name)!==normIgnore(name)); _persistIgnored(next); return next; });
@@ -19600,6 +19674,9 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
                       }
                     });
                     setMapping(reMap); setMatchConf(reConf); setMemoryMap({});
+                    // Re-sort the review list on the FRESH matches — otherwise rows keep the pre-reset order
+                    // (file/alphabetical) and the fuzzy scores look unsorted (Austin). Weakest match floats up.
+                    setRowOrder(computeRowOrder(fileRows, reMap, reConf, {}));
                     setSavedMsg(`🗑 Memory cleared for ${fileSource} · ⚡ Re-matched ${autoC} rows`);
                   }}
                   style={{background:_lm?"#fee2e2":"#1a0808",border:`1px solid ${_lm?"#fca5a5":"#ef444430"}`,borderRadius:5,padding:"3px 9px",color:_lm?"#dc2626":"#f87171",fontSize:10,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}
@@ -19901,14 +19978,16 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
                                 </button>
                               )}
                             </div>
-                            <select value={assigned} onChange={e=>{ const v=e.target.value; if(v==="__ignore__"){ addIgnore(name); assignRow(i,""); } else { assignRow(i, v); } }}
-                              style={{background:assigned?(_lm?"#ddf2ea":"#002e24"):isUnmatched?(_lm?"#fffbeb":"#1a0e00"):(_lm?"#e8f4ef":"#0b2522"),border:`1px solid ${assigned?(_lm?"#00c896":"#00c89640"):isUnmatched?"#f59e0b40":(_lm?"#c4e0d8":"#182f2c")}`,borderRadius:5,padding:"3px 7px",color:assigned?(_lm?"#024744":"#00e5a0"):isUnmatched?"#f59e0b":(_lm?"#789e99":"#bfe3da"),fontSize:12,outline:"none",cursor:"pointer",width:"100%"}}>
-                              <option value="">— leave unassigned —</option>
-                              <option value="__ignore__" style={{color:"#ef4444"}}>🚫 Ignore this campaign</option>
-                              {displayList.map(c=>(
-                                <option key={c.id} value={c.id}>{c.campaignName.trim()} · {c.platform} · {c.mediaPartner}{allArchivedIds.has(String(c.id))?" · (archived)":""}</option>
-                              ))}
-                            </select>
+                            <CampaignPicker
+                              value={assigned}
+                              options={displayList}
+                              searchOptions={_reachable}
+                              archivedIds={allArchivedIds}
+                              onPick={(v)=>assignRow(i, v)}
+                              onIgnore={()=>{ addIgnore(name); assignRow(i, ""); }}
+                              lm={_lm}
+                              isUnmatched={isUnmatched}
+                            />
                           </div>
                         );
                       })()}
@@ -25375,12 +25454,20 @@ export default function App() {
       let csv = csvIn; if(!csv){ try{ csv = localStorage.getItem("tvsci-cached-csv")||""; }catch{ csv=""; } }
       if(!csv){ setTvsciUnmapped([]); return; }
       let sm={}; try{ sm = JSON.parse(localStorage.getItem(CSV_MAPPINGS_KEY)||"{}"); }catch{}
-      try{ setTvsciUnmapped(tvsciUnmappedWithSpend(csv, sm)); }catch{ setTvsciUnmapped([]); }
+      try{
+        let res = tvsciUnmappedWithSpend(csv, sm);
+        // Drop lines the user chose to IGNORE in Quick Check-in — they deliberately aren't being mapped, so
+        // they shouldn't keep the "N campaigns need mapping" banner lit (Austin). Keyed by the same name.
+        try{ const ig=JSON.parse(localStorage.getItem("qci-ignored-names")||"[]"); if(Array.isArray(ig)&&ig.length){ const S=new Set(ig.map(e=>String((e&&e.name)||"").trim().toLowerCase())); res=res.filter(u=>!S.has(String(u.name||"").trim().toLowerCase())); } }catch{}
+        setTvsciUnmapped(res);
+      }catch{ setTvsciUnmapped([]); }
     };
     const onAuto = e => recompute(e?.detail?.csv);
+    const onIgnore = () => recompute();          // re-run when the ignore list changes, so the banner clears
     window.addEventListener("tvsci-autosync", onAuto);
+    window.addEventListener("qci-ignored-changed", onIgnore);
     recompute();
-    return () => window.removeEventListener("tvsci-autosync", onAuto);
+    return () => { window.removeEventListener("tvsci-autosync", onAuto); window.removeEventListener("qci-ignored-changed", onIgnore); };
   }, [campaigns]);
   // "Map them" (unmapped-spend banner): load the cached TVsci spend report into Quick Check-in so its rows
   // stage with the improved client+tactic auto-match pre-filled — the user reviews the ⚠ ones and Applies,
@@ -25761,6 +25848,56 @@ export default function App() {
   // ctr/cpm), adds them to the target snapshot, and updates top-level campaign
   // fields on both sides. Also writes a savedMappings entry so future QCI drops
   // route the line correctly without the user having to remap.
+  // Move a campaign's TVsci SPEND-REPORT numbers to the correct campaign. Unlike the per-line breakdown
+  // sources, TVsci spend is a campaign-level total (no snapshot line), so this moves the four spend fields
+  // AND — the real fix — repoints the shared `TVsci Spend||…` memory so the auto-sync (tvsciAutoApplyUpdates)
+  // and the next Quick Check-in both route to the corrected campaign. Clearing the "last auto-applied" stamp
+  // lets the next sync re-derive EXACT per-campaign totals from the repointed memory (handles the rare case
+  // where the source held more than the one mis-mapped line).
+  function moveTvsciSpend(fromCampaignId, toCampaignId) {
+    const today = getToday();
+    const num = v => parseFloat(String(v??"").replace(/[$,\s]/g,""))||0;
+    const fromCamp = campaigns.find(c => String(c.id) === String(fromCampaignId));
+    const toCamp   = campaigns.find(c => String(c.id) === String(toCampaignId));
+    if (!fromCamp) return;
+    const mv = { life:num(fromCamp.tvsciLifetimeSpend), daily:num(fromCamp.tvsciDailyBudget), yest:num(fromCamp.tvsciYesterdaySpend), today:num(fromCamp.tvsciTodaySpend), asOf:fromCamp.tvsciSpendAsOf||"", sync:fromCamp.lastSpendSync||"" };
+    const moveOnto = (c) => {
+      if (String(c.id) === String(fromCampaignId)) {
+        return { ...c, tvsciLifetimeSpend:"", tvsciDailyBudget:"", tvsciYesterdaySpend:"", tvsciTodaySpend:"", tvsciSpendAsOf:"", lastSpendSync:"" };
+      }
+      if (String(c.id) === String(toCampaignId)) {
+        return { ...c,
+          tvsciLifetimeSpend: (num(c.tvsciLifetimeSpend)+mv.life).toFixed(2),
+          tvsciDailyBudget:   (num(c.tvsciDailyBudget)+mv.daily).toFixed(2),
+          tvsciYesterdaySpend:(num(c.tvsciYesterdaySpend)+mv.yest).toFixed(2),
+          tvsciTodaySpend:    (num(c.tvsciTodaySpend)+mv.today).toFixed(2),
+          tvsciSpendAsOf: mv.asOf || c.tvsciSpendAsOf || today,
+          lastSpendSync:  mv.sync || c.lastSpendSync || new Date().toISOString(),
+          status: c.status === "" ? "active" : c.status,
+          reassignedLines: (() => { const nm="tvsci spend"; const prev=Array.isArray(c.reassignedLines)?c.reassignedLines.filter(m=>m&&m.name!==nm):[]; return [...prev,{name:nm,date:today}].slice(-30); })(),
+        };
+      }
+      return c;
+    };
+    setCampaigns(cs => cs.map(moveOnto));
+    if (typeof setArchive === "function") setArchive(as => as.map(moveOnto));
+    try {
+      const stored = JSON.parse(localStorage.getItem(CSV_MAPPINGS_KEY) || "{}");
+      Object.keys(stored).forEach(key => {
+        const entry = stored[key];
+        if (!entry || String(entry.campId) !== String(fromCampaignId)) return;
+        if (key.startsWith("TVsci Spend||") || key.startsWith("TVsci Daily||")) {
+          stored[key] = { ...entry, campId:String(toCampaignId), campName: toCamp ? toCamp.campaignName.trim() : (entry.campName||""), learnedAt:today, viaMove:true };
+        }
+      });
+      localStorage.setItem(CSV_MAPPINGS_KEY, JSON.stringify(stored));
+      localStorage.removeItem("tvsci-last-autoapplied");   // let the next sync re-derive exact totals from the repointed memory
+    } catch (e) { console.warn("Failed to repoint TVsci spend memory:", e); }
+    if (fromCamp && toCamp) {
+      addLog({ type:"edited", campaignName:toCamp.campaignName, partner:toCamp.mediaPartner, platform:toCamp.platform,
+        detail:`Moved TVsci spend ${fromCamp.campaignName} → ${toCamp.campaignName} ($${mv.life.toFixed(2)} lifetime). Auto-sync + check-ins now route here.`, campaignId:toCamp.id, prevSnapshot:null });
+    }
+  }
   function reassignBreakdownLine({ line, fromCampaignId, snapField, snapKey }, toCampaignId) {
     const today = getToday();
     // Rebuild aggregate totals from the new breakdown array — guarantees the
@@ -27853,7 +27990,7 @@ export default function App() {
               if(typeof window!=="undefined" && typeof requestAnimationFrame==="function")
                 requestAnimationFrame(()=>requestAnimationFrame(()=>window.scrollTo(0, sy)));
             }}
-            onReassignLine={(target, toCampaignId) => reassignBreakdownLine(target, toCampaignId)}
+            onReassignLine={(target, toCampaignId) => (target && target.isTvsciSpend) ? moveTvsciSpend(target.fromCampaignId, toCampaignId) : reassignBreakdownLine(target, toCampaignId)}
             onClearLine={(target) => clearBreakdownLine(target)}
             onEdit={(camp)=>{ setEditInitialTab("details"); setEditTarget(camp); }}
             onClearMetrics={(id)=>{
