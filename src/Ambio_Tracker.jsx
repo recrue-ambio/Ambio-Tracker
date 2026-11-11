@@ -938,6 +938,70 @@ function ambioClient(name){
   if(m) s = m[1];
   return s.toLowerCase().replace(/[^a-z0-9]+/g," ").replace(/\s+/g," ").trim();
 }
+// The CLIENT part of a campaign name with its ORIGINAL case (for acronyms) — everything before the last " - tactic".
+function ambioClientRaw(name){ const s=String(name||""); const m=s.match(/^(.*)\s[-–]\s[^-–]*$/); return (m?m[1]:s).trim(); }
+// Acronym of a client name (sub-program parens dropped). Returns BOTH all-words initials ("College of
+// Wooster"→"COW") and significant-words initials (skip of/the/and → "CW"), so a file that names a school by
+// INITIALS ("OSU","RIT","CoW","CSUSB","WCU","SBC") can be matched to the spelled-out tracker name (Austin).
+function acronymOf(name){
+  const base = String(name||"").replace(/\([^)]*\)/g," ");
+  const words = base.replace(/[^A-Za-z\s]/g," ").split(/\s+/).filter(Boolean);
+  const stop = new Set(["of","the","and","at","for","a","an","in","on","to"]);
+  return { a: words.map(w=>w[0]).join("").toUpperCase(),
+           b: words.filter(w=>!stop.has(w.toLowerCase())).map(w=>w[0]).join("").toUpperCase() };
+}
+// Match one Ambio TVsci (Spend/Daily) row to a tracker campaign. Client (fuzzy) + normalized tactic, with the
+// Ad-Account FULL client name as a fallback for abbreviated campaign names, PLUS an acronym pass so a file
+// that names the school by initials still scores instead of coming back empty. `cands` is already platform-
+// gated. Returns {id, conf} or null. Shared by the file-drop AND the Reset Memory re-match (which previously
+// fell to a plain name-fuzzy and gave initials ZERO score — the bug Austin hit).
+// NOTE: fuzzyScore is a QuickCheckInPanel-local function (not module scope), so it's passed IN as `fz`.
+function matchTVsciRow(rawName, accountRaw, cands, fz){
+  const sClient = ambioClient(rawName);
+  const sTactic = ambioTactic(rawName);
+  const sAccount = ambioClient(String(accountRaw||"").replace(/^(ambio|amb|recrue)[_\s\-]+/i,""));
+  const subTokens = (String(rawName).match(/\(([^)]+)\)/g) || [])
+    .map(p=>p.replace(/[()]/g,"").trim())
+    .filter(p=>p && !/^[a-z]{1,3}\d{2,4}$/i.test(p));
+  const sAccountPlus = subTokens.length
+    ? (sAccount + " " + subTokens.join(" ")).toLowerCase().replace(/[^a-z0-9]+/g," ").replace(/\s+/g," ").trim()
+    : sAccount;
+  const scorePass = (sc)=>{
+    let bId="", bSc=0, ti=false;
+    cands.forEach(c=>{
+      const cT = ambioTactic(c.campaignName);
+      if(sTactic && cT && sTactic !== cT) return;
+      let s = fz(sc, ambioClient(c.campaignName));
+      if(s < 0.55) return;
+      if(sTactic && cT && sTactic === cT) s = Math.min(1, s + 0.12);
+      if(s > bSc){ bSc=s; bId=String(c.id); ti=false; }
+      else if(s===bSc && String(c.id)!==bId){ ti=true; }
+    });
+    return {bId,bSc,ti};
+  };
+  let r = {bId:"",bSc:0,ti:false};
+  if(sClient){ r = scorePass(sClient); if(r.bSc<0.6 && sAccountPlus && sAccountPlus!==sClient){ const r2=scorePass(sAccountPlus); if(r2.bSc>r.bSc) r=r2; } }
+  if(r.bSc < 0.6){   // weak name match → try initials
+    const lead = String(rawName).split(/\s*[-–(]/)[0].trim();
+    const isAcr = (lead.match(/[A-Z]/g)||[]).length >= 2 && lead.replace(/[^A-Za-z]/g,"").length <= 6;
+    if(isAcr){
+      const target = lead.replace(/[^A-Za-z]/g,"").toUpperCase();
+      const subStr = subTokens.join(" ").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+      let bId="", bSc=0;
+      cands.forEach(c=>{
+        const cT = ambioTactic(c.campaignName);
+        if(sTactic && cT && sTactic !== cT) return;
+        const ac = acronymOf(ambioClientRaw(c.campaignName));
+        if(ac.a!==target && ac.b!==target) return;
+        let s = 0.7;
+        if(subStr){ const cSub = ((ambioClientRaw(c.campaignName).match(/\(([^)]+)\)/)||[])[1]||"").toLowerCase(); s = cSub ? (0.55 + 0.4*fz(subStr, cSub)) : 0.66; }
+        if(s > bSc){ bSc=s; bId=String(c.id); }
+      });
+      if(bId && bSc > r.bSc){ r = { bId, bSc:Math.min(0.85,bSc), ti:false }; }
+    }
+  }
+  return r.bId ? { id:r.bId, conf: r.ti ? 0.5 : Math.min(1, r.bSc) } : null;
+}
 
 // ── Ambio Daily Digest (the TVsci-emailed .xlsx QA report) ──────────────────────────────────────────
 // Lazy-load SheetJS from the CDN (same lib the Quick Check-in uses) so the Daily Digest pacing view can
@@ -16960,7 +17024,7 @@ function InitialsPrompt({ current, onSave, onClose }){
 // that opens a portal'd dropdown carrying its OWN search box. Empty search shows the smart candidates
 // (`options`); once you type, it searches the broader on-platform pool (`searchOptions`) so every matching
 // campaign (incl. archived) is reachable. Portal + fixed position so a scroll container can't clip it.
-function CampaignPicker({ value, options, searchOptions, archivedIds, onPick, onIgnore, lm, isUnmatched }){
+function CampaignPicker({ value, options, searchOptions, archivedIds, onPick, onIgnore, lm, isUnmatched, rowLabel }){
   const _lm = lm;
   const [open, setOpen] = React.useState(false);
   const [q, setQ] = React.useState("");
@@ -16976,7 +17040,12 @@ function CampaignPicker({ value, options, searchOptions, archivedIds, onPick, on
     const inside = (el)=> (btnRef.current&&btnRef.current.contains(el)) || (panelRef.current&&panelRef.current.contains(el));
     const onDoc = e=>{ if(!inside(e.target)) setOpen(false); };
     const onKey = e=>{ if(e.key==="Escape") setOpen(false); };
-    const onScroll = e=>{ const t=e.target; if(t&&t.nodeType&&panelRef.current&&panelRef.current.contains(t)) return; setOpen(false); }; // row-list scroll closes; inner list scroll doesn't (resize target is window, not a Node)
+    // Scrolling the review list no longer CLOSES the dropdown (Austin: "when I scroll this dropdown goes
+    // away") — instead it REPOSITIONS the portal to stay pinned under its button, so the open picker rides
+    // along with the row. Scrolling the dropdown's OWN inner list is ignored. If the button scrolls fully
+    // out of its scroll container, the menu follows to the edge rather than vanishing.
+    const reposition = ()=>{ const el=btnRef.current; if(el) setRect(el.getBoundingClientRect()); };
+    const onScroll = e=>{ const t=e.target; if(t&&t.nodeType&&panelRef.current&&panelRef.current.contains(t)) return; reposition(); };
     document.addEventListener("mousedown", onDoc);
     document.addEventListener("keydown", onKey);
     window.addEventListener("scroll", onScroll, true);
@@ -16984,15 +17053,31 @@ function CampaignPicker({ value, options, searchOptions, archivedIds, onPick, on
     return ()=>{ document.removeEventListener("mousedown", onDoc); document.removeEventListener("keydown", onKey); window.removeEventListener("scroll", onScroll, true); window.removeEventListener("resize", onScroll); };
   }, [open]);
   const qq = q.trim().toLowerCase();
-  const base = qq ? ((searchOptions && searchOptions.length) ? searchOptions : options) : options;
-  const list = (base||[]).filter(c=> !qq || c.campaignName.toLowerCase().includes(qq) || String(c.platform||"").toLowerCase().includes(qq) || String(c.mediaPartner||"").toLowerCase().includes(qq));
-  const labelTxt = assigned ? `${assigned.campaignName.trim()} · ${assigned.platform} · ${assigned.mediaPartner}` : "— leave unassigned —";
+  // Multi-term AND search: "suny ug" matches "SUNY Brockport (UG Adult)" — each space-separated term just has
+  // to appear SOMEWHERE in the campaign's name + platform + partner (any order, case-insensitive). Was a single
+  // contiguous substring match, which failed any time the words weren't adjacent in that exact order (Austin).
+  const terms = qq ? qq.split(/\s+/).filter(Boolean) : [];
+  const base = terms.length ? ((searchOptions && searchOptions.length) ? searchOptions : options) : options;
+  const list = (base||[]).filter(c=>{
+    if(!terms.length) return true;
+    const hay = (c.campaignName + " " + (c.platform||"") + " " + (c.mediaPartner||"")).toLowerCase();
+    return terms.every(t => hay.includes(t));
+  });
   const bg = value?(_lm?"#ddf2ea":"#002e24"):isUnmatched?(_lm?"#fffbeb":"#1a0e00"):(_lm?"#e8f4ef":"#0b2522");
   const bd = value?(_lm?"#00c896":"#00c89640"):isUnmatched?"#f59e0b40":(_lm?"#c4e0d8":"#182f2c");
   const fg = value?(_lm?"#024744":"#00e5a0"):isUnmatched?"#f59e0b":(_lm?"#789e99":"#bfe3da");
-  const optSt = { padding:"6px 9px", fontSize:12, cursor:"pointer", borderBottom:`1px solid ${_lm?"#eef4f2":"#102a26"}`, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" };
+  const optSt = { padding:"6px 9px", fontSize:12, cursor:"pointer", borderBottom:`1px solid ${_lm?"#eef4f2":"#102a26"}`, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", display:"flex", alignItems:"center", gap:6 };
+  // Colored platform pill so the tactic reads at a glance (TDV/DRT/VRT… get the tactic's own color) —
+  // matches the colors used everywhere else in the app and makes a wrong-tactic pick jump out.
+  const pbadge = (plat, shrink=true)=>{ const pc=(typeof PLT_COLORS!=="undefined"&&PLT_COLORS[plat])||(_lm?"#0369a1":"#7dd3fc"); return <span style={{background:pc+(_lm?"22":"26"),color:pc,border:`1px solid ${pc}55`,borderRadius:3,padding:"0 5px",fontSize:9,fontWeight:800,letterSpacing:"0.02em",flexShrink:shrink?0:undefined}}>{plat}</span>; };
   const panel = (open && rect) ? ReactDOM.createPortal(
-    <div ref={panelRef} style={{position:"fixed", zIndex:9999, top:Math.round(rect.bottom+2), left:Math.round(rect.left), width:Math.round(Math.max(rect.width, 340)), maxHeight:320, background:_lm?"#ffffff":"#07211c", border:`1px solid ${_lm?"#c4e0d8":"#1d3a35"}`, borderRadius:7, boxShadow:"0 10px 30px rgba(0,0,0,0.45)", display:"flex", flexDirection:"column", overflow:"hidden"}}>
+    <div ref={panelRef} style={{position:"fixed", zIndex:9999, top:Math.round(rect.bottom+4), left:Math.round(rect.left), width:Math.round(Math.max(rect.width, 340)), maxHeight:360, background:_lm?"#ffffff":"#07211c", border:`1px solid ${_lm?"#c4e0d8":"#1d3a35"}`, borderRadius:7, boxShadow:"0 10px 30px rgba(0,0,0,0.45)", display:"flex", flexDirection:"column", overflow:"hidden"}}>
+      {/* Which file row you're mapping — its OWN clearly-separated band (uppercase label on its own line, the
+          file name below, allowed to WRAP) so the name is never clipped or crowded by the search box (Austin). */}
+      {rowLabel && <div style={{padding:"8px 11px 9px", background:_lm?"#eef6f3":"#031512", borderBottom:`2px solid ${_lm?"#cfe6df":"#0d3630"}`}}>
+        <div style={{fontSize:8.5, fontWeight:800, letterSpacing:"0.06em", textTransform:"uppercase", color:_lm?"#6b9088":"#5f9a90", marginBottom:2}}>Mapping file line</div>
+        <div style={{fontSize:11.5, fontWeight:700, lineHeight:1.3, color:_lm?"#0f172a":"#e9f4f1", whiteSpace:"normal", wordBreak:"break-word"}}>{rowLabel}</div>
+      </div>}
       <input autoFocus value={q} onChange={e=>setQ(e.target.value)} placeholder="Type to filter campaigns…"
         onKeyDown={e=>{ if(e.key==="Enter"&&list.length===1){ onPick(String(list[0].id)); setOpen(false); } }}
         style={{border:"none", borderBottom:`1px solid ${_lm?"#c4e0d8":"#1d3a35"}`, background:_lm?"#f3f7f7":"#0b2522", color:_lm?"#0f172a":"#e6f3f0", fontSize:12, padding:"8px 10px", outline:"none"}}/>
@@ -17003,7 +17088,8 @@ function CampaignPicker({ value, options, searchOptions, archivedIds, onPick, on
         {list.slice(0,300).map(c=>{ const sel=String(c.id)===String(value); return (
           <div key={c.id} onClick={()=>{ onPick(String(c.id)); setOpen(false); }}
             style={{...optSt, background:sel?(_lm?"#ddf2ea":"#09322a"):"transparent", color:sel?(_lm?"#024744":"#00e5a0"):(_lm?"#0f172a":"#d6ece7"), fontWeight:sel?700:400}}>
-            {c.campaignName.trim()} <span style={{opacity:0.62}}>· {c.platform} · {c.mediaPartner}{archivedIds&&archivedIds.has(String(c.id))?" · (archived)":""}</span>
+            {pbadge(c.platform)}
+            <span style={{flex:1, overflow:"hidden", textOverflow:"ellipsis"}}>{c.campaignName.trim()} <span style={{opacity:0.62}}>· {c.mediaPartner}{archivedIds&&archivedIds.has(String(c.id))?" · (archived)":""}</span></span>
           </div>); })}
       </div>
     </div>, document.body) : null;
@@ -17011,7 +17097,8 @@ function CampaignPicker({ value, options, searchOptions, archivedIds, onPick, on
     <div style={{width:"100%"}}>
       <button type="button" ref={btnRef} onClick={()=> open ? setOpen(false) : doOpen()}
         style={{background:bg, border:`1px solid ${bd}`, borderRadius:5, padding:"4px 7px", color:fg, fontSize:12, outline:"none", cursor:"pointer", width:"100%", textAlign:"left", display:"flex", alignItems:"center", gap:6}}>
-        <span style={{flex:1, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{labelTxt}</span>
+        {assigned ? <>{pbadge(assigned.platform)}<span style={{flex:1, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{assigned.campaignName.trim()} <span style={{opacity:0.7}}>· {assigned.mediaPartner}</span></span></>
+                  : <span style={{flex:1, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>— leave unassigned —</span>}
         <span style={{opacity:0.6, fontSize:10}}>▾</span>
       </button>
       {panel}
@@ -17102,6 +17189,17 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
   // PAST month's closing totals (into monthlyBackups) so the lifetime/Flight-Total view is accurate for
   // TD/Google campaigns whose MTD check-ins only started this month. Never touches current-month numbers.
   const [backfillMonth, setBackfillMonth] = React.useState("");
+  // AUTO-MATCH candidate pool. Normally active + recently-archived (assignPool). But when BACKFILLING a
+  // PAST month, the campaigns that ran that month have often ENDED and been archived past the 31-day window,
+  // so they'd never get a fuzzy score (Austin: mapping an October file, archived lines showed nothing). For
+  // a backfill, widen to archived campaigns that ENDED or were ARCHIVED in/after that month — the ones a
+  // past-month file is actually about.
+  const matchBasePool = React.useMemo(()=>{
+    if(!backfillMonth) return assignPool;
+    const mStart = backfillMonth + "-01";
+    const bf = qciArchive.filter(a => (a.archivedDate && String(a.archivedDate) >= mStart) || (a.endDate && String(a.endDate).slice(0,10) >= mStart));
+    return [...activeCamps, ...bf];
+  }, [backfillMonth, assignPool, qciArchive, activeCamps]);
   const [fileRows,     setFileRows]     = React.useState(null);   // parsed rows from file drop
   // Filters the review list only — a big drop is 130+ rows (the TVsci book) and finding the two you
   // need to re-check means scrolling the lot. Matches the file's row name AND the campaign it's
@@ -18709,8 +18807,8 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
       // auto-matches its final trailing delivery. Active campaigns are listed first, and ties keep the
       // first match, so an active campaign always wins over an archived one of the same name (renewals).
       const qciFiltered = activePlats.size > 0
-        ? assignPool.filter(c => activePlats.has(c.platform))
-        : assignPool;
+        ? matchBasePool.filter(c => activePlats.has(c.platform))
+        : matchBasePool;
 
       // Layer 2: SOURCE_PLATFORMS — hard constraint by file type.
       // A Google file can ONLY match SEM/YT campaigns; a TradeDesk file can ONLY match TD/TDV/etc.
@@ -18733,6 +18831,20 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
         if(!matchedId){
           matchedId = matchTTDClientToTracker(getTTDClientName(advName), matchCandidates);
           conf = 0.8;
+        }
+        if(!matchedId){
+          // Last-resort fuzzy so the row gets SOME score for review instead of landing fully unmatched
+          // (Austin: "UF should have a fuzzy score for reference"). Keep the coarse tactic gate so an
+          // Instream row can't fall onto the client's Display line; low conf → review gate + confirm.
+          const _fTac = ttdCoarseTactic(campName);
+          const _labels = [getTTDClientName(advName), campName].filter(Boolean).map(s=>s.toLowerCase());
+          let _bId="", _bSc=0;
+          matchCandidates.forEach(c=>{
+            const _tTac = ttdCoarseTactic(c.campaignName);
+            if(_fTac && _tTac && _fTac!==_tTac) return;
+            _labels.forEach(lb=>{ const sc=fuzzyScore(lb, c.campaignName.toLowerCase()); if(sc>_bSc){ _bSc=sc; _bId=String(c.id); } });
+          });
+          if(_bId && _bSc>=0.4){ matchedId=_bId; conf=_bSc; }
         }
         if(matchedId){ initMap[i]=matchedId; initConf[i]=conf; autoCount++; }
       } else if(source==="DSP"){
@@ -18764,57 +18876,15 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
         // (Tippie) - Display Outreach". A TVsci drop must never auto-match or offer non-TVsci campaigns.
         // Ambiguous client (several same-prefix campaigns) or unknown tactic → low confidence so the ⚠
         // review gate catches it; whatever you map is then REMEMBERED for the next sync.
+        // Client (fuzzy) + normalized TACTIC, with the Ad-Account FULL client name as a fallback for
+        // abbreviated campaign names, PLUS an acronym pass (OSU→Oklahoma State University, RIT, CoW, CSUSB…)
+        // so an initials-only file row still scores instead of coming back empty. All of that now lives in the
+        // shared matchTVsciRow() so the file-drop AND Reset Memory re-match behave identically. STAY ON-PLATFORM:
+        // candidates are already the TVsci-family gate (SOURCE_PLATFORMS + the user's pills + not-yet-started).
         const rawName = getCampName(row, source);
-        const sClient = ambioClient(rawName);
-        const sTactic = ambioTactic(rawName);
-        // The Ad Account Name is the FULL client ("Ambio_Rochester Institute of Technology") even when the
-        // Campaign Name is an abbreviation/alias ("RIT (National Campaign)") or carries an "(F26)" tag that
-        // tanks the fuzzy score. Use it as a FALLBACK client — but only when the campaign-name match came back
-        // weak, so multi-flight accounts (one Ad Account → University of Iowa Geofence/Tippie/RT/Juniors/…)
-        // still disambiguate by their sub-account token from the CAMPAIGN name instead of all tying on the
-        // shared Ad Account. The result is a pre-fill suggestion the review gate still vets before Apply.
-        // The account/advertiser column differs by source: TVsci Spend carries "Ad Account Name", TVsci
-        // Daily carries "Advertiser Name" (both like "Ambio_<Client>"). Read whichever is present and strip
-        // the Ambio/AMB prefix to the bare client — WITHOUT this, Daily rows had no account fallback, so a
-        // campaign name with an "(F26)" tag ("Alvernia (F26) - Video RT" → client token "alvernia f26")
-        // scored 0.5 against "Alvernia University" and auto-matched NOTHING.
-        const sAccount = ambioClient(String(row["Ad Account Name"]||row["Advertiser Name"]||"").replace(/^(ambio|amb|recrue)[_\s\-]+/i,""));
-        // The account name is the WHOLE-school client ("Oklahoma State University") — it has no sub-program,
-        // so when a school runs several books (OSU Branding / Enrollment-OK / DFW-Enrollment / …) the account
-        // alone ties across ALL of them (every variant scored the same → a 50% review-gate tie, landing data
-        // on the wrong line). The distinguishing token lives in the campaign name's parenthetical
-        // ("OSU (Branding) - CTV/OTT"), which the file ABBREVIATES the client in ("OSU") so the raw campaign
-        // name can't fuzzy-match the spelled-out tracker name. So fold the account client TOGETHER with the
-        // campaign's sub-program parenthetical → "oklahoma state university branding", which matches the
-        // tracker's own "Oklahoma State University (Branding)" and disambiguates the sub-programs. Flight
-        // tags ("(F26)", "(SP26)") are dropped so single-book schools (Alvernia) still match on the account.
-        const _subTokens = (String(rawName).match(/\(([^)]+)\)/g) || [])
-          .map(p => p.replace(/[()]/g, "").trim())
-          .filter(p => p && !/^[a-z]{1,3}\d{2,4}$/i.test(p));   // keep "Branding"/"UG"/"DFW-Enrollment"; drop "F26"
-        const sAccountPlus = _subTokens.length
-          ? (sAccount + " " + _subTokens.join(" ")).toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim()
-          : sAccount;
-        const scorePass = (sc)=>{
-          let bId="", bSc=0, ti=false;
-          matchCandidates.forEach(c=>{
-            const cTactic = ambioTactic(c.campaignName);
-            if(sTactic && cTactic && sTactic !== cTactic) return;               // tactics known and disagree → skip
-            let score = fuzzyScore(sc, ambioClient(c.campaignName));
-            if(score < 0.55) return;
-            if(sTactic && cTactic && sTactic === cTactic) score = Math.min(1, score + 0.12);  // reward a tactic match
-            if(score > bSc){ bSc=score; bId=String(c.id); ti=false; }
-            else if(score===bSc && String(c.id)!==bId){ ti=true; }
-          });
-          return {bId,bSc,ti};
-        };
-        if(sClient){
-          let r = scorePass(sClient);
-          if(r.bSc < 0.6 && sAccountPlus && sAccountPlus!==sClient){   // weak name match → retry with the full account client + sub-program
-            const r2 = scorePass(sAccountPlus);
-            if(r2.bSc > r.bSc) r = r2;
-          }
-          if(r.bId){ initMap[i]=r.bId; initConf[i]= r.ti ? 0.5 : Math.min(1, r.bSc); autoCount++; }
-        }
+        const _acct  = row["Ad Account Name"]||row["Advertiser Name"]||"";  // Spend=Ad Account, Daily=Advertiser
+        const _hit = matchTVsciRow(rawName, _acct, matchCandidates, fuzzyScore);
+        if(_hit){ initMap[i]=_hit.id; initConf[i]=_hit.conf; autoCount++; }
       } else if(source==="Google"){
         // Route this row to its own tactic FIRST: a YouTube/Video row → the client's YT campaign, a
         // Search row → their SEM campaign — so Search spend can't book onto the YouTube line (or vice-
@@ -19695,13 +19765,15 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
                     let reMap={}, reConf={}, autoC=0;
                     fileRows.forEach((row,i)=>{
                       reMap[i]="";
-                      const qciFiltered2 = qciPlatforms.size>0 ? activeCamps.filter(c=>qciPlatforms.has(c.platform)) : activeCamps;
+                      const qciFiltered2 = qciPlatforms.size>0 ? matchBasePool.filter(c=>qciPlatforms.has(c.platform)) : matchBasePool;
                       const sourcePlats2 = SOURCE_PLATFORMS[fileSource];
                       const cands2 = sourcePlats2 ? qciFiltered2.filter(c=>sourcePlats2.has(c.platform)) : qciFiltered2;
                       if(fileSource==="TradeDesk"){
-                        const advN=getTTDAdvertiserName(row); const clN=getTTDClientName(advN);
-                        const mid=matchTTDClientToTracker(clN,cands2);
-                        if(mid){reMap[i]=mid;reConf[i]=0.8;autoC++;}
+                        const advN=getTTDAdvertiserName(row); const campN2=row["Campaign"]||row["campaign"]||"";
+                        let mid=matchAmbioTTDToTracker(campN2, advN, cands2); let cf=0.9;
+                        if(!mid){ mid=matchTTDClientToTracker(getTTDClientName(advN), cands2); cf=0.8; }
+                        if(!mid){ const _ft=ttdCoarseTactic(campN2); const _lbs=[getTTDClientName(advN),campN2].filter(Boolean).map(s=>s.toLowerCase()); let _b="",_s=0; cands2.forEach(c=>{ const _tt=ttdCoarseTactic(c.campaignName); if(_ft&&_tt&&_ft!==_tt)return; _lbs.forEach(lb=>{const sc=fuzzyScore(lb,c.campaignName.toLowerCase()); if(sc>_s){_s=sc;_b=String(c.id);}}); }); if(_b&&_s>=0.4){mid=_b;cf=_s;} }
+                        if(mid){reMap[i]=mid;reConf[i]=cf;autoC++;}
                       } else if(fileSource==="Google"){
                         const aN=getGoogleAccountName(row); const clN=getGoogleClientName(aN);
                         const mid=matchGoogleToTracker(clN,cands2,googleRowIsYouTube(row)?"YT":"SEM");
@@ -19710,6 +19782,14 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
                           const csvN=getCampName(row,fileSource);
                           if(csvN){let bId="",bSc=0;cands2.forEach(c=>{const sc=fuzzyScore(csvN,c.campaignName);if(sc>bSc&&sc>=0.45){bSc=sc;bId=String(c.id);}});if(bId){reMap[i]=bId;reConf[i]=bSc;autoC++;}}
                         }
+                      } else if(fileSource==="TVsci Spend" || fileSource==="TVsci Daily"){
+                        // Use the SAME matcher the drop uses — client + tactic + Ad-Account fallback + the
+                        // acronym pass — so Reset Memory no longer dumps initials-named rows (OSU, RIT, CoW…)
+                        // at 0 score. Was a plain name-fuzzy here, which is why Austin's reset wiped their scores.
+                        const rawN=getCampName(row,fileSource);
+                        const acctN=row["Ad Account Name"]||row["Advertiser Name"]||"";
+                        const hit=matchTVsciRow(rawN, acctN, cands2, fuzzyScore);
+                        if(hit){reMap[i]=hit.id;reConf[i]=hit.conf;autoC++;}
                       } else {
                         const csvN=getCampName(row,fileSource);
                         let bId="",bSc=0;
@@ -20036,6 +20116,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
                               onIgnore={()=>{ addIgnore(name); assignRow(i, ""); }}
                               lm={_lm}
                               isUnmatched={isUnmatched}
+                              rowLabel={isTTD && name ? `${displayName} (${name})` : (displayName||name)}
                             />
                           </div>
                         );
