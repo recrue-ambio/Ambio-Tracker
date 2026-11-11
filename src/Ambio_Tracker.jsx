@@ -489,6 +489,16 @@ const PLATFORM_VENDOR_DEFAULT = {
 // without a reload, and re-read here on refresh.
 const PLATFORM_VENDOR = (()=>{ try{ const c=loadCustomPlatforms(); return {...PLATFORM_VENDOR_DEFAULT, ...(c.vendors||{})}; }catch{ return {...PLATFORM_VENDOR_DEFAULT}; } })();
 function vendorOf(platform){ return PLATFORM_VENDOR[platform] || (platform ? String(platform) : "Other"); }
+// Render a platform <select>'s options GROUPED by vendor (The Trade Desk, TVsci, Google, Meta…) via
+// <optgroup>, so the tactic picker reads by partner instead of one long flat list (Austin — Add/IO/Proposal).
+// `list` is sortPlatforms'd first so each vendor's tactics sit together and the groups come out in buy order.
+function platformOptionGroups(list){
+  const groups=[];
+  sortPlatforms([...new Set(list)]).forEach(p=>{ const v=vendorOf(p); let g=groups.find(x=>x.v===v); if(!g){ g={v,items:[]}; groups.push(g); } g.items.push(p); });
+  return groups.map(g=> g.items.length===1 && g.items[0]===g.v
+    ? <option key={g.v} value={g.v}>{g.v}</option>                                   // lone self-named tactic (EMAIL…) — no redundant group wrapper
+    : <optgroup key={g.v} label={g.v}>{g.items.map(p=><option key={p} value={p}>{p}</option>)}</optgroup>);
+}
 // Vendor display order follows the first tactic of each vendor in PLATFORM_GROUP_ORDER, so the
 // breakdown lists vendors in the same familiar order as every platform picker.
 function vendorRank(vendor){
@@ -5247,7 +5257,7 @@ function Modal({ campaign, onSave, onClose, isNew, partners=[], reminders=[], se
     <div style={{marginBottom:12}}>
       <label style={{display:"block",fontSize:10,color:_lm?"#527a75":"#d1ece5",marginBottom:3,textTransform:"uppercase",letterSpacing:"0.06em"}}>{label}</label>
       {key==="status" ? <select value={f.status||""} onChange={e=>set("status",e.target.value)} style={iS}>{Object.entries(STATUS_CFG).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}</select>
-      :key==="platform" ? <select value={f.platform} onChange={e=>set("platform",e.target.value)} style={iS}>{sortPlatforms([...ALL_PLATFORMS]).map(p=><option key={p}>{p}</option>)}</select>
+      :key==="platform" ? <select value={f.platform} onChange={e=>set("platform",e.target.value)} style={iS}>{platformOptionGroups(ALL_PLATFORMS)}</select>
       :type==="date" ? <DatePicker value={f[key]||""} onChange={v=>set(key,v)}/>
       :<input type={type} value={f[key]||""} onChange={e=>set(key,e.target.value)} style={iS}/>}
     </div>
@@ -10270,6 +10280,34 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   // benchmarks) OR a severe under/over pacer. Grades the SAME values the row shows (resolved `disp`
   // over the stored fields), so the filter agrees with the coloured KPI cells. Severe pacing only
   // counts when the data is FRESH (checked within 4 days) — stale pacing is misleading (the user).
+  // Pacing GROUPS pool their budget across member lines, so ONE member being behind/over isn't real trouble
+  // when the GROUP as a whole is on pace (Austin: the flag marked individual lines behind even though the
+  // whole group paces great). Precompute each group's COMBINED health (same rollup the 💲 Spend view shows:
+  // combined synced spend vs combined budget + combined-pace label); troubleReasonsFor then drops the
+  // pacing/budget-family flags on a member whose group is healthy. Line-level issues (dark / not-spending /
+  // stale / CTR / CPM) still flag per line — only the pooled pacing signals are group-aware.
+  const groupHealthy = React.useMemo(()=>{
+    const gm = {};
+    (campaigns||[]).forEach(c=>{ const g=(c.pacingGroup||"").trim(); if(!g) return;
+      if(pacingMetricFor(c.platform,c.dealType)!=="spend") return;   // groups are the TVsci spend pools
+      const u = gm[g] || (gm[g]={del:0,bud:0,goal:0,starts:[],ends:[],plat:c.platform,deal:c.dealType});
+      u.del  += parseFloat(c.tvsciLifetimeSpend)||0;
+      u.bud  += parseFloat(c.budget)||0;
+      u.goal += parseGoalNumber(pacingGoalRaw(c))||0;
+      if(c.startDate) u.starts.push(c.startDate);
+      if(c.endDate)   u.ends.push(c.endDate);
+    });
+    const out = {};
+    Object.entries(gm).forEach(([g,u])=>{
+      const over = u.bud>0 && u.del > u.bud*1.01;
+      u.starts.sort(); u.ends.sort();
+      const synth = {platform:u.plat,dealType:u.deal,startDate:u.starts[0]||"",endDate:u.ends.length?u.ends[u.ends.length-1]:""};
+      const lp = computeLifetimePacing(synth, u.del, u.goal);
+      const behind = !!(lp && lp.pct<1 && /Behind|Missed|short/i.test(lp.label||""));
+      out[g] = !over && !behind;   // healthy = neither over the combined budget nor behind the combined pace
+    });
+    return out;
+  }, [campaigns]);
   // Which trouble REASONS a row has (empty = not trouble). Same signals as before, but now itemized so the
   // "filter by issue" chips can slice the trouble list by CTR / CPM / Pacing / etc. rowIsTrouble = any reason.
   const troubleReasonsFor = (row) => {
@@ -10374,6 +10412,14 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       const ended   = c.endDate && c.endDate.slice(0,10) < _t;
       if(started && !ended){ const ys = yesterdayFromSeries(c, pacingNow()); if(ys && ys.value === 0) out.push("dark"); }
     }
+    // Group-pooled suppression: a member of a HEALTHY pacing group inherits the group's pace (budget shifts
+    // freely between the pool's lines), so drop its own pacing/budget flags — the pool covers it. If the group
+    // itself is behind/over, the member flags stay so the trouble is still surfaced. Line-level issues
+    // (not-spending / dark / stale / CTR / CPM / freq / rate) are NOT suppressed — those are real per line.
+    { const _grp = (c.pacingGroup||"").trim();
+      if(_grp && groupHealthy[_grp]){
+        for(const k of ["pace","capped","overspend","goalhit","endsoon"]){ const i=out.indexOf(k); if(i>=0) out.splice(i,1); }
+      } }
     // De-dupe the PACING axis so one campaign shows ONE pacing flag, not three (Austin: least clutter, no
     // double-counting). "Over budget" already says the line is spending past budget / too fast — so when it
     // fires, drop the redundant "Pacing" (here it can only be the over-pace direction — a behind line can't be
@@ -18178,6 +18224,17 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
         if(accEntry && fullPool.find(c=>String(c.id)===String(accEntry.campId))) return accEntry.campId;
       }
     }
+    // TVsci: the hourly sync writes "TVsci Spend||name" but a manual TVsci DAILY drop looks up
+    // "TVsci Daily||name" (and vice-versa) — same campaigns, same Campaign-Name column — so a mapping made
+    // via either must be reusable by the other. Check BOTH TVsci prefixes (Austin: the manual TVsci
+    // check-in couldn't reuse the mapping memory from the TVsci sync).
+    if((source==="TVsci Spend" || source==="TVsci Daily") && csvName){
+      const nm = csvName.trim().toLowerCase();
+      for(const pref of ["TVsci Spend","TVsci Daily"]){
+        const e = savedMappings[`${pref}||${nm}`];
+        if(e && fullPool.find(c=>String(c.id)===String(e.campId))) return e.campId;
+      }
+    }
     // Fallback: key by campaign name (non-TTD/Google sources + TTD legacy)
     const key=makeNameKey(source,csvName);
     const entry=savedMappings[key];
@@ -18229,6 +18286,11 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
           next[`Facebook/Meta||acc:${accountName.toLowerCase()}`] = {...payload, accountName};
         }
         if(csvName) next[makeNameKey(source,csvName)]=payload;
+        // Cross-write TVsci Spend ↔ TVsci Daily so a mapping made via either (the hourly sync is "TVsci
+        // Spend", a manual daily drop is "TVsci Daily") is reusable by the other — same campaigns, same
+        // Campaign-Name key. Also lets the background auto-apply (reads "TVsci Spend||") pick up a line
+        // mapped from a TVsci Daily drop.
+        if((source==="TVsci Spend" || source==="TVsci Daily") && csvName){ const nm=csvName.trim().toLowerCase(); next[`TVsci Spend||${nm}`]=payload; next[`TVsci Daily||${nm}`]=payload; }
       });
       // Persist to this browser. A SILENT failure here (storage full) is exactly how a long mapping session
       // "didn't save" — so surface it instead of swallowing it.
@@ -24532,7 +24594,7 @@ function IODraftReviewModal({ drafts, meta, lightMode, existingPartners, onAppro
                   <div style={{fontSize:9,color:_lm?"#789e99":"#bfe3da",textTransform:"uppercase",letterSpacing:"0.06em",fontWeight:700,marginBottom:3}}>Platform</div>
                   <select value={d.platform} onChange={e=>updateField(i,"platform",e.target.value)}
                     style={{width:"100%",background:_lm?"#eaf5f1":"#0b2522",border:`1px solid ${_lm?"#b6dccf":"#182f2c"}`,borderRadius:5,padding:"5px 9px",color:_lm?"#0f172a":"#e3edec",fontSize:12,cursor:"pointer"}}>
-                    {platformOptions.map(p=><option key={p} value={p}>{p}</option>)}
+                    {platformOptionGroups(ALL_PLATFORMS)}
                   </select>
                 </div>
                 <div>
