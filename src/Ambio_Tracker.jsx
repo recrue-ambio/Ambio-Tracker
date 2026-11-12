@@ -23072,11 +23072,13 @@ function getDataStartMonth() {
     }
   } catch {}
   if (!earliest) return curMonth; // empty tracker → current month; grows as data is added
-  // Floor established data at the clean-tracking epoch. Nothing before June 2026 has COMPLETE data
-  // (pre-June was partial/projected and threw the numbers off), so an existing tracker with older rows
-  // still starts at June — but any tracker whose data begins later (a fresh copy) starts at its own
-  // first month. This floor is invisible to anyone who never had pre-June-2026 data.
-  const DATA_EPOCH = "2026-06";
+  // Floor established data at the clean-tracking epoch. Lowered to MAY 2026 (2026-11-12, Austin): Ambio
+  // backfilled the full delivery history for campaigns running since May (Google + others), and the shop
+  // runs on LIFETIME spend — so May must COUNT toward lifetime/revenue, not be floored out. An existing
+  // tracker with older rows starts at May; a fresh copy (no data) still starts at its own first month, so
+  // this floor is invisible to anyone who never had pre-May-2026 data. (Config → General "Data Start Month"
+  // override still wins over this floor for any tracker that needs a different start.)
+  const DATA_EPOCH = "2026-05";
   return earliest < DATA_EPOCH ? DATA_EPOCH : earliest;
 }
 
