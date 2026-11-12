@@ -9876,7 +9876,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   // Which TVsci spend-report LINE(s) feed each campaign — read from the saved check-in mappings so the
   // 💲 Spend expanded row can NAME what it's matched with (Austin: makes a wrong map easy to spot, e.g. an
   // "Alvernia Grad" line sitting on the "Alvernia UG" campaign). Keyed campId → [file line names].
-  const tvsciSpendNamesByCamp = React.useMemo(()=>{
+  const tvsciNamesByCamp = React.useMemo(()=>{
     const m={};
     // The mapping KEY is lowercased, so recover the ORIGINAL case: prefer the entry's stored csvName, else
     // re-case from the cached spend report (which carries the true "Campaign Name"), else show the key.
@@ -9884,9 +9884,34 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     try{ const csv=localStorage.getItem("tvsci-cached-csv")||""; if(csv){ parseCsvRows(csv).forEach(r=>{ const n=String(r["Campaign Name"]||"").trim(); if(n) caseMap[n.toLowerCase()]=n; }); } }catch{}
     try{
       const sm = JSON.parse(localStorage.getItem(CSV_MAPPINGS_KEY)||"{}");
+      // Cover BOTH TVsci mapping sources — Spend sync AND Daily QCI — so a single-line campaign mapped
+      // through EITHER one still names its source line (Austin: a line mapped only via TVsci Daily was
+      // showing "no source line"). Dedupe by lowercased name so the two prefixes don't double-list it.
       Object.entries(sm).forEach(([k,v])=>{
         if(!v || !v.campId) return;
-        if(k.startsWith("TVsci Spend||")){ const id=String(v.campId); const lc=k.slice("TVsci Spend||".length); (m[id]=m[id]||[]).push(v.csvName || caseMap[lc] || lc); }
+        let lc=null;
+        if(k.startsWith("TVsci Spend||")) lc=k.slice("TVsci Spend||".length);
+        else if(k.startsWith("TVsci Daily||")) lc=k.slice("TVsci Daily||".length);
+        else return;
+        const id=String(v.campId);
+        const name = v.csvName || caseMap[lc] || lc;
+        const seen = m[id]=m[id]||[];
+        if(!seen.some(x=>x.toLowerCase()===String(name).toLowerCase())) seen.push(name);
+      });
+    }catch{}
+    return m;
+  }, [campaigns]);
+  // Per-line breakdown saved at month-close / backfill (MONTHLY_BACKUP_KEY) — the LASTING record of a
+  // campaign's per-source-line split once its live snapshot is gone (flight ended, or the month rolled and
+  // the snapshot was cleared). Keyed by campId → the MOST RECENT closed month that carries a breakdown, so
+  // the Metrics dropdown can still show "which line delivered what" to catch a mismap (Austin).
+  const backupBreakdownByCamp = React.useMemo(()=>{
+    const m={};
+    try{
+      const backups = JSON.parse(localStorage.getItem(MONTHLY_BACKUP_KEY)||"{}")||{};
+      Object.keys(backups).sort().forEach(mo=>{   // ascending — a later month OVERWRITES, so we end on the most recent
+        const arr = backups[mo] && Array.isArray(backups[mo].campaigns) ? backups[mo].campaigns : [];
+        arr.forEach(r=>{ if(r && Array.isArray(r.breakdown) && r.breakdown.length) m[String(r.id)] = { month:mo, breakdown:r.breakdown }; });
       });
     }catch{}
     return m;
@@ -11720,7 +11745,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     // per-line breakdown), so a row expands when it has synced spend data. Elsewhere it expands on
     // chart/brief/check-in data as before. Keeps the two data sources fully separated per view.
     const _hasSpendReport = (parseFloat(c.tvsciLifetimeSpend)||0) > 0 || (parseFloat(c.tvsciDailyBudget)||0) > 0 || (c.tvsciYesterdaySpend!=null && String(c.tvsciYesterdaySpend)!=="");
-    const canExpand = spendOnly ? _hasSpendReport : (!!rowBreakdown || hasWeekly || hasCreatives || primaryRaw > 0);
+    const canExpand = spendOnly ? _hasSpendReport : (!!rowBreakdown || hasWeekly || hasCreatives || primaryRaw > 0 || !!backupBreakdownByCamp[String(c.id)]);
 
     // Group members (lines rolling up to a pacing-group header) are indented + smaller + faintly tinted so they
     // read as sub-lines under their header — but keep their OWN pacing colour (green/yellow/red), not a group tint.
@@ -12059,7 +12084,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
           </div>
           {/* Name the spend-report LINE(S) this campaign is matched with — so a wrong mapping (e.g. the
               "Alvernia Grad" line landing on the "Alvernia UG" campaign) is obvious at a glance (Austin). */}
-          {(()=>{ const nm = tvsciSpendNamesByCamp[String(c.id)] || [];
+          {(()=>{ const nm = tvsciNamesByCamp[String(c.id)] || [];
             if(nm.length) return (
               <div style={{marginBottom:9}}>
                 <div style={{fontSize:8.5,color:lightMode?"#789e99":"#8fb3ad",textTransform:"uppercase",letterSpacing:"0.05em",fontWeight:700}}>📄 Mapped from</div>
@@ -12083,6 +12108,21 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
               ↪ Move spend to another campaign
             </button>
           )}
+        </div>
+      );
+    })()}
+    {/* TVsci source line(s) — METRICS view. A single-line TVsci campaign has no per-ad-group breakdown
+        table (no ttdSnapshots), so without this the dropdown never names the line its data came from and a
+        wrong mapping is invisible (Austin). Reverse-looked-up from the saved TVsci mappings (Spend + Daily),
+        so it works retroactively for anything already checked in — no re-QCI needed. */}
+    {!spendOnly && rowBreakdownOpen && vendorOf(c.platform)==="TVsci" && (()=>{
+      const nm = tvsciNamesByCamp[String(c.id)] || [];
+      return (
+        <div style={{padding:"9px 16px 9px 42px",borderBottom:"1px solid "+lmBrdR,background:lightMode?"#e8f4ef":"#061917"}}>
+          <div style={{fontSize:8.5,color:lightMode?"#789e99":"#8fb3ad",textTransform:"uppercase",letterSpacing:"0.05em",fontWeight:700,marginBottom:2}}>📄 TVsci line mapped to this campaign</div>
+          {nm.length
+            ? <div style={{fontSize:13,fontWeight:700,color:lightMode?"#0f2e2a":"#e3edec",wordBreak:"break-word"}}>{nm.join("  ·  ")}</div>
+            : <div style={{fontSize:11.5,color:lightMode?"#b45309":"#f59e0b",fontStyle:"italic"}}>No TVsci source line on file — this line may not be mapped yet.</div>}
         </div>
       );
     })()}
@@ -12458,6 +12498,45 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
             })}
           </div>
           {!hasPrior&&<div style={{fontSize:9,color:lightMode?"#97bab6":"#8fbfb6",fontStyle:"italic",marginTop:6}}>Yesterday delivery per line will appear after your next CSV drop (needs two days of data to compute).</div>}
+        </div>
+      );
+    })()}
+    {/* Persisted per-line breakdown (FALLBACK) — when there's NO live snapshot breakdown, show the one saved
+        at the last month-close / backfill, so an ENDED flight (or a month that already rolled) can still be
+        inspected for a mismapped line. Read-only (no Move/Clear — it's history), amber-themed to set it apart
+        from the live green breakdown above. Only shows when the live breakdown is absent. */}
+    {!spendOnly && rowBreakdownOpen && !rowBreakdown && (()=>{
+      const bk = backupBreakdownByCamp[String(c.id)];
+      if(!bk || !Array.isArray(bk.breakdown) || !bk.breakdown.length) return null;
+      const moLabel = (()=>{ const [y,mm]=String(bk.month).split("-").map(Number); return mm?new Date(y,mm-1,1).toLocaleDateString("en-US",{month:"short",year:"2-digit"}):bk.month; })();
+      const useViews = metricKind==="views" && bk.breakdown.some(b=>(b.videoViews||0)>0);
+      const leadVal = b => useViews?(b.videoViews||0):(b.impressions||0);
+      const leadLabel = useViews?"views":"impr";
+      const sorted = [...bk.breakdown].sort((a,b)=>leadVal(b)-leadVal(a));
+      const totalLead = sorted.reduce((s,b)=>s+leadVal(b),0);
+      return (
+        <div style={{background:lightMode?"#faf7ec":"#141006",borderBottom:"1px solid "+lmBrdR,borderLeft:"3px solid "+(lightMode?"#d97706":"#b45309"),padding:"6px 16px 10px 42px"}}>
+          <div style={{fontSize:9,color:lightMode?"#b45309":"#fbbf24",textTransform:"uppercase",letterSpacing:"0.06em",fontWeight:700,marginBottom:5}}>
+            📦 Final per-line breakdown · {moLabel} close <span style={{textTransform:"none",letterSpacing:0,fontWeight:400,color:lightMode?"#92826a":"#b2a07a"}}>— saved at month-close (no live data; flight ended or month rolled)</span>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:3}}>
+            {sorted.map((b,i)=>{
+              const bLead=leadVal(b); const pct=totalLead>0?(bLead/totalLead)*100:0;
+              return (
+                <div key={i} style={{display:"flex",alignItems:"center",gap:10,background:lightMode?"#f3ecd9":"#1a1408",border:`1px solid ${lightMode?"#e3d4a8":"#3a2f14"}`,borderRadius:5,padding:"6px 10px"}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:11,color:lightMode?"#274642":"#d8c89a",fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}} title={b.name}>{b.name}</div>
+                    <div style={{fontSize:9,color:lightMode?"#97bab6":"#b2a07a",marginTop:1}}>{pct.toFixed(0)}% of total {leadLabel}</div>
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+                    <span style={{fontSize:11,color:lightMode?"#0f172a":"#e3edec",fontWeight:700,fontVariantNumeric:"tabular-nums",minWidth:70,textAlign:"right"}}>{parseInt(bLead||0).toLocaleString()}<span style={{color:lightMode?"#97bab6":"#8fbfb6",fontWeight:400,fontSize:9}}> {leadLabel}</span></span>
+                    <span style={{fontSize:11,color:(b.clicks||0)>0?"#c5d8d6":lmTxtD,fontWeight:600,minWidth:55,textAlign:"right",fontVariantNumeric:"tabular-nums"}}>{(b.clicks||0)>0?`${parseInt(b.clicks).toLocaleString()} clk`:"—"}</span>
+                    <span style={{fontSize:11,color:(b.spend||0)>0?"#f472b6":lmTxtD,fontWeight:600,minWidth:55,textAlign:"right",fontVariantNumeric:"tabular-nums"}}>{(b.spend||0)>0?`$${Math.round(b.spend).toLocaleString()}`:"—"}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       );
     })()}
@@ -19252,6 +19331,9 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
           ctr: ctrRatio? ctrRatio.toFixed(5):"", cpm: cpm? cpm.toFixed(4):"",
           spend: u.spend? u.spend.toFixed(2):"0", videoViews:String(u.videoViews||0),
           completionRate: u.completionRate? String(u.completionRate):"",
+          // Keep the per-line breakdown with the backfilled month too — so re-dropping a PAST month's Daily
+          // file rebuilds its Fall/Summer per-line split, not just the aggregate (Austin: perfect for the long run).
+          ...((Array.isArray(u.breakdown) && u.breakdown.length) ? { breakdown: u.breakdown.map(x=>({ name:x.name, impressions:x.impressions, clicks:x.clicks, spend:x.spend, ctr:x.ctr, videoViews:x.videoViews, vcr:x.vcr })) } : {}),
           frequency:"", note1:c.note1||"", deviceFee:0, deviceLineImpr:0, _backfilled:true,
         });
         n++;
@@ -27077,11 +27159,22 @@ export default function App() {
             }
             spendVal = Math.max(0, _tvLife - priorSum).toFixed(2);
           }
+          // Capture the per-line breakdown (from whichever snapshot holds it) BEFORE step 2 clears the
+          // snapshots — this monthly backup becomes the only lasting record of the Fall/Summer (per source
+          // line) split, so a closed/ended flight can still be inspected for a mismapped line (Austin).
+          const _lineBd = (()=>{
+            for(const f of ["metaSnapshots","ttdSnapshots","dspSnapshots","googleSnapshots","snapSnapshots"]){
+              const b = c[f] && c[f].mtd && c[f].mtd.breakdown;
+              if(Array.isArray(b) && b.length) return b.map(x=>({ name:x.name, impressions:x.impressions, clicks:x.clicks, spend:x.spend, ctr:x.ctr, videoViews:x.videoViews, vcr:x.vcr }));
+            }
+            return null;
+          })();
           return { id:c.id, campaignName:c.campaignName, platform:c.platform, mediaPartner:c.mediaPartner,
             impressions:pick(rm.impressions,c.impressions), clicks:pick(rm.clicks,c.clicks), ctr:pick(rm.ctr,c.ctr),
             cpm:pick(rm.cpm,c.cpm), spend:spendVal,
             videoViews:pick(rm.videoViews,c.videoViews), completionRate:pick(rm.completionRate,c.completionRate),
             frequency:c.frequency, note1:c.note1,
+            ...(_lineBd ? { breakdown:_lineBd } : {}),
             // Freeze the device-targeting surcharge NOW, while the live line-breakdown still exists —
             // step 2 below clears metaSnapshots, so this is the only chance to retain it for history.
             deviceFee: deviceFeeCurrent(c), deviceLineImpr: c.deviceSurcharge ? deviceLineImpr(c) : 0 };
