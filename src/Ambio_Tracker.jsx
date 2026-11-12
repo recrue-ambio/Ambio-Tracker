@@ -13414,7 +13414,10 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       {/* Status filter — the SAME multi-select as the Campaigns tab (Active / Pacing Behind / Pacing Ahead /
           Off / Close to Goal / Pending), filtering on c.status. Empty = all. Sits LEFT of Platforms. */}
       <StatusMultiSelect fStatuses={fStatuses} setFStatuses={setFStatuses} lightMode={lightMode}/>
-      <PlatformMultiSelect platforms={platforms} fPlatforms={fPlatforms} setFPlatforms={setFPlatforms} lightMode={lightMode} grouped/>
+      {/* In the 💲 Spend view only TVsci lines exist (the Ambio Spend Report is TVsci-only), so the platform
+          filter lists ONLY the TVsci tactics — the others would never have spend data there and just confused
+          the picker (Austin). Metrics/Digest views keep the full platform list. */}
+      <PlatformMultiSelect platforms={pacingView==="spend" ? platforms.filter(p=>vendorOf(p)==="TVsci") : platforms} fPlatforms={fPlatforms} setFPlatforms={setFPlatforms} lightMode={lightMode} grouped/>
       {/* Freshness filter — ONE dropdown, replacing the old ✓/✕ button pair + the row of day chips
           (the "updated 2d 3d 7d 14d" cluster the user found ugly). The value encodes both the mode and
           the window: "all" | "up:<days>" | "not:<days>". Each label carries its live match count. */}
