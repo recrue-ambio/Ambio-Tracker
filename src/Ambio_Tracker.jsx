@@ -9862,7 +9862,7 @@ function quietAdsForReport(cr) {
 }
 
 // ─── Pacing Dashboard ─────────────────────────────────────────────────────
-function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=()=>{}, lightMode=false, onEdit=()=>{}, onClearMetrics=()=>{}, onActivate=()=>{}, onSetStatus=()=>{}, onReassignLine=()=>{}, onClearLine=()=>{}, quickCheckIn=false, onToggleQuickCheckIn=()=>{}, quickCheckInPanel=null, monthResetAvailable=false, onCloseMonth=()=>{}, focusRequest=null, unmappedSpend=[], onMapUnmapped=()=>{} }) {
+function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=()=>{}, lightMode=false, onEdit=()=>{}, onClearMetrics=()=>{}, onActivate=()=>{}, onSetStatus=()=>{}, onReassignLine=()=>{}, onClearLine=()=>{}, quickCheckIn=false, onToggleQuickCheckIn=()=>{}, quickCheckInPanel=null, monthResetAvailable=false, onCloseMonth=()=>{}, focusRequest=null, unmappedSpend=[], onMapUnmapped=()=>{}, onMarkReviewed=()=>{} }) {
   // ── Reassign-line modal state ──
   // When the user clicks the ↪ icon on a breakdown line, we open a search modal
   // that lets them move that line's data to a different campaign without redoing QCI.
@@ -10286,28 +10286,51 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   // combined synced spend vs combined budget + combined-pace label); troubleReasonsFor then drops the
   // pacing/budget-family flags on a member whose group is healthy. Line-level issues (dark / not-spending /
   // stale / CTR / CPM) still flag per line — only the pooled pacing signals are group-aware.
-  const groupHealthy = React.useMemo(()=>{
+  // Combined stats for each pacing group over ALL its members (not whatever subset a filter leaves visible).
+  // Drives (a) the group-aware Trouble suppression below and (b) the 💲 Spend group HEADER, so the header
+  // shows the TRUE pooled pacing even under the Trouble filter (Austin: with the flag on, the group header
+  // was recomputing from only the one visible behind line — e.g. showing 12.2% instead of the real 31.5%).
+  const groupStats = React.useMemo(()=>{
     const gm = {};
     (campaigns||[]).forEach(c=>{ const g=(c.pacingGroup||"").trim(); if(!g) return;
       if(pacingMetricFor(c.platform,c.dealType)!=="spend") return;   // groups are the TVsci spend pools
-      const u = gm[g] || (gm[g]={del:0,bud:0,goal:0,starts:[],ends:[],plat:c.platform,deal:c.dealType});
-      u.del  += parseFloat(c.tvsciLifetimeSpend)||0;
-      u.bud  += parseFloat(c.budget)||0;
-      u.goal += parseGoalNumber(pacingGoalRaw(c))||0;
+      const del=parseFloat(c.tvsciLifetimeSpend)||0, goal=parseGoalNumber(pacingGoalRaw(c))||0;
+      const u = gm[g] || (gm[g]={del:0,bud:0,goal:0,dailyBud:0,yest:0,starts:[],ends:[],plat:c.platform,deal:c.dealType,total:0,behind:0,offN:0});
+      u.del += del; u.bud += parseFloat(c.budget)||0; u.goal += goal;
+      u.dailyBud += parseFloat(c.tvsciDailyBudget)||0;
+      u.yest += parseFloat(c.tvsciYesterdaySpend)||0;
       if(c.startDate) u.starts.push(c.startDate);
       if(c.endDate)   u.ends.push(c.endDate);
+      u.total += 1;
+      if(c.status==="off"||c.status==="paused") u.offN += 1;
+      const mlp = computeLifetimePacing(c, del, goal);   // this member's OWN pace → "N/M behind"
+      if(mlp && mlp.pct<1 && /Behind|Missed|short/i.test(mlp.label||"")) u.behind += 1;
     });
     const out = {};
     Object.entries(gm).forEach(([g,u])=>{
       const over = u.bud>0 && u.del > u.bud*1.01;
       u.starts.sort(); u.ends.sort();
       const synth = {platform:u.plat,dealType:u.deal,startDate:u.starts[0]||"",endDate:u.ends.length?u.ends[u.ends.length-1]:""};
-      const lp = computeLifetimePacing(synth, u.del, u.goal);
+      const lp = computeLifetimePacing(synth, u.del, u.goal) || {pct:u.goal>0?u.del/u.goal:0,color:"#bfe3da",label:"",expected:0,timeFrac:null,delivered:u.del,goal:u.goal,unit:"$",metricKind:"spend",hasDates:false,daysLeft:null,ended:false};
       const behind = !!(lp && lp.pct<1 && /Behind|Missed|short/i.test(lp.label||""));
-      out[g] = !over && !behind;   // healthy = neither over the combined budget nor behind the combined pace
+      out[g] = { healthy: !over && !behind, lp, delivered:u.del, goal:u.goal, total:u.total, behindCount:u.behind,
+                 dailyBud:u.dailyBud, yest:u.yest, allOff:u.total>0&&u.offN===u.total };
     });
     return out;
   }, [campaigns]);
+  const groupHealthy = React.useMemo(()=>{ const o={}; Object.entries(groupStats).forEach(([g,s])=>o[g]=s.healthy); return o; }, [groupStats]);
+  // Adam's "I looked at this" marker (Austin): a per-row manual-review stamp so a CM can track which pacing
+  // lines they've already eyeballed. Kept in localStorage — per-user working state, NOT on the campaign object,
+  // so it never bloats backups or crosses between the separate per-CM trackers. Click the box to stamp today's
+  // date; click the date again to clear it.
+  const [reviewedMarks, setReviewedMarks] = useState(()=>{ try{ return JSON.parse(localStorage.getItem("pacing-reviewed")||"{}")||{}; }catch{ return {}; } });
+  const toggleReviewed = (id)=>{
+    const wasMarked = !!reviewedMarks[id];
+    setReviewedMarks(prev=>{ const next={...prev}; if(next[id]) delete next[id]; else next[id]=getToday(); try{ localStorage.setItem("pacing-reviewed", JSON.stringify(next)); }catch{} return next; });
+    // A manual eyeball is a more accurate "last check" than an automated data drop — so STAMPING the eye also
+    // updates the campaign's shared "Last Checked" (Campaigns tab). Only on stamp, never on clear (Austin).
+    if(!wasMarked) onMarkReviewed(id);
+  };
   // Which trouble REASONS a row has (empty = not trouble). Same signals as before, but now itemized so the
   // "filter by issue" chips can slice the trouble list by CTR / CPM / Pacing / etc. rowIsTrouble = any reason.
   const troubleReasonsFor = (row) => {
@@ -11444,7 +11467,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   // pacing vs budget + yesterday-vs-daily. 10 cols: name·platform·bar·goal·spend/exp·gap·need/day·yest·daily·edit.
   // With the freed-up room (the user): a leaner name column shifts Platform + the pacing bar LEFT, and the
   // pacing-bar column is flex-heavy (1.6fr) so the bar itself stretches long across the extra width.
-  const GRID_SPEND = "minmax(260px,1fr) 66px minmax(280px,1.2fr) 80px 124px 84px 84px 104px 84px 60px";
+  const GRID_SPEND = "minmax(260px,1fr) 66px minmax(190px,0.8fr) 92px 140px 84px 84px 104px 84px 60px";
 
   function TableRow({c,disp,pacing,monthlyGoal,flightChart,spendOnly,groupMember}){
     // Breakdown-expanded state is lifted to the parent (expandedRows Set, keyed by campaign id) so it
@@ -11709,7 +11732,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
           it's still searchable and shown in the edit modal, just not cluttering every pacing row.
           STICKY: pinned to the left so the campaign name stays visible when you scroll the table right. */}
       <div style={{minWidth:0,position:"sticky",left:0,zIndex:2,background:_rowBg,boxShadow:`6px 0 8px -6px rgba(0,0,0,${lightMode?0.16:0.55})`,paddingLeft:groupMember?38:0}}>
-        <div style={{fontSize:groupMember?12:14,fontWeight:groupMember?500:700,color:lmTxt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",display:"flex",alignItems:"center",gap:6}}>
+        <div style={{fontSize:groupMember?12:14,fontWeight:groupMember?500:700,color:lmTxt,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",display:"flex",alignItems:"center",gap:6,paddingRight:70}}>
           {canExpand&&(
             <button onClick={()=>setRowBreakdownOpen(v=>!v)}
               title={spendOnly
@@ -11721,10 +11744,10 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
           )}
           <span onClick={canExpand?()=>setRowBreakdownOpen(v=>!v):undefined}
             title={canExpand?(spendOnly?"Click to open the Ambio Spend Report detail":"Click to open the daily/weekly chart"):undefined}
-            style={{whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:canExpand?"pointer":"default"}}>{c.campaignName.trim()}</span>
+            style={{flex:"1 1 auto",minWidth:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:canExpand?"pointer":"default"}}>{c.campaignName.trim()}</span>
           {!spendOnly&&rowBreakdown&&<span style={{fontSize:9,color:lightMode?"#84cdc4":"#b2cbc8",background:lightMode?"#d5eae2":"#0b302c",borderRadius:3,padding:"0 4px",fontWeight:700,flexShrink:0}}>{rowBreakdown.length}</span>}
         </div>
-        <div style={{display:"flex",alignItems:"center",gap:6,overflow:"hidden"}}>
+        <div style={{display:"flex",alignItems:"center",gap:6,overflow:"hidden",paddingRight:70}}>
           {/* Full flight dates "M/D/YY - M/D/YY" (the user) — start neutral, END colour-coded by
               days-left urgency (drc) so an imminent end still reads yellow/red. The old "· ends"
               and mid-month "↪ started" badges are gone: the range now shows both dates outright. */}
@@ -11746,6 +11769,28 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
               (e.g. "Revert to standard set up 9/16", "Exposure"), not a pacing flag, and the red ⚠ made
               fine, on-pace lines look flagged. Note 2 still shows on the Campaigns tab + edit form. */}
         </div>
+        {/* Manual "reviewed" marker (Adam) — pulled OUT of the name's top line and absolutely positioned,
+            vertically CENTERED across the whole cell so it lines up evenly with the tactic/platform badge
+            (which is row-centered), not sitting high on the first line. right:14 + the grid gap give it a
+            little breathing room from the tactic button. The two text lines reserve paddingRight so names
+            never slide under it. Quiet (no fill/border) so the platform pills dominate; AGES green/amber/red. */}
+        {(()=>{ const _rv=reviewedMarks[c.id];
+          let _tier=null, _days=0;
+          if(_rv){
+            _days=Math.max(0,Math.floor((new Date(getToday()+"T00:00:00")-new Date(_rv+"T00:00:00"))/86400000));
+            _tier = _days<=7 ? "fresh" : (_days<=12 ? "aging" : "stale");
+          }
+          const _col = _tier==="fresh" ? (lightMode?"#15803d":"#00d48a")
+                     : _tier==="aging" ? (lightMode?"#b45309":"#fbbf24")
+                     : _tier==="stale" ? (lightMode?"#b91c1c":"#f87171")
+                     : (lightMode?"#9cc0b8":"#5f7d78");
+          return <div style={{position:"absolute",right:10,top:0,bottom:0,display:"flex",alignItems:"center",zIndex:3}}>
+            <button onClick={e=>{ e.stopPropagation(); toggleReviewed(c.id); }}
+              title={_rv?`You personally reviewed this line ${_days===0?"today":_days===1?"1 day ago":_days+" days ago"} (${fmtDate(_rv)})${_tier==="stale"?" — getting old, worth another look":_tier==="aging"?" — aging":""}. (Separate from when data was last synced.) Click to clear.`:"Mark that you've personally eyeballed this line — stamps today's date. Separate from the data-sync date."}
+              style={{flexShrink:0,cursor:"pointer",fontSize:11,fontWeight:700,background:"none",border:"none",padding:"4px 6px",borderRadius:4,lineHeight:"14px",whiteSpace:"nowrap",color:_col,opacity:_rv?1:0.55}}>
+              {_rv?`👁 ${(()=>{const[y,m,d]=_rv.split("-");return `${+m}/${+d}`;})()}`:"👁"}</button>
+          </div>;
+        })()}
       </div>
 
       {/* Platform */}
@@ -11759,10 +11804,10 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       {/* Monthly pacing bar — green/yellow/red fill, electric blue expected tick, exp% + goal badges below */}
       <div title="Monthly pacing">
         {pacing?<>
-          <div style={{position:"relative",background:lmBarTrk,borderRadius:4,height:10,overflow:"visible",marginBottom:2}}>
+          <div style={{position:"relative",background:lmBarTrk,borderRadius:4,height:7,overflow:"visible",marginBottom:2}}>
             <div style={{background:lmC(col),height:"100%",width:Math.min(100,pacing.pct*100)+"%",borderRadius:4}}/>
             <div title={"Expected: "+(exp?.toLocaleString()??"")}
-              style={{position:"absolute",top:-4,left:Math.min(97,pacing.expectedPct*100)+"%",width:3,height:18,background:"#38bdf8",borderRadius:1,zIndex:3,boxShadow:"0 0 6px #38bdf8, 0 0 12px #38bdf888"}}/>
+              style={{position:"absolute",top:-4,left:Math.min(97,pacing.expectedPct*100)+"%",width:3,height:15,background:"#38bdf8",borderRadius:1,zIndex:3,boxShadow:"0 0 6px #38bdf8, 0 0 12px #38bdf888"}}/>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
             <span style={{fontSize:11,color:lmC(col),fontWeight:700}}>{(pacing.pct*100).toFixed(1)}%</span>
@@ -11789,7 +11834,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
               const _isFl = (pacing && pacing.flightBasis) || monthlyGoalIsFromFlight(c);
               const _g = (pacing && pacing.flightBasis && pacing.goal) ? pacing.goal : monthlyGoal;
               return <div style={{display:"flex",flexDirection:"column",gap:1,alignItems:"flex-start"}}>
-              <span style={{fontSize:11,fontWeight:700,color:"#00e5a0"}} title={`Goal: ${_g.toLocaleString()}`}>
+              <span style={{fontSize:13,fontWeight:700,color:"#00e5a0"}} title={`Goal: ${_g.toLocaleString()}`}>
                 {metricKind==="spend"
                   ? "$"+(_g>=1000?(_g/1000).toFixed(1)+"k":_g.toFixed(0))
                   : _g>=1000000?(_g/1000000).toFixed(2)+"M":_g>=1000?(_g/1000).toFixed(1)+"K":String(_g)}
@@ -11803,8 +11848,8 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       <div title="Served / expected">
         {primaryFmt
           ? <div style={{display:"flex",alignItems:"baseline",gap:3,flexWrap:"wrap"}}>
-              <span style={{fontSize:12,fontWeight:800,color:lightMode?"#0891b2":"#38bdf8",letterSpacing:"-0.01em"}}>{primaryFmt}</span>
-              {expFmt && <span style={{fontSize:11,fontWeight:700,color:lightMode?"#0891b2":"#38bdf8"}}>/ {expFmt}</span>}
+              <span style={{fontSize:14,fontWeight:800,color:lightMode?"#0891b2":"#38bdf8",letterSpacing:"-0.01em"}}>{primaryFmt}</span>
+              {expFmt && <span style={{fontSize:12,fontWeight:700,color:lightMode?"#0891b2":"#38bdf8"}}>/ {expFmt}</span>}
               <span style={{fontSize:9,color:lmTxtD}}>{primaryLabel}</span>
             </div>
           : noActivity
@@ -12817,13 +12862,21 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
             units.forEach(u => {
               if (u.type!=="group") { const r=u.row; u.lp=r.lp; u.delivered=r.delivered; u.goalNum=r.goalNum; u.isOff=r.isOff; return; }
               const m=u.members;
-              const delivered=m.reduce((s,x)=>s+(x.delivered||0),0);
-              const goalNum=m.reduce((s,x)=>s+(x.goalNum||0),0);
-              const starts=m.map(x=>x.c.startDate).filter(Boolean).sort();
-              const ends=m.map(x=>x.c.endDate).filter(Boolean).sort();
-              const synth={platform:m[0].c.platform,dealType:m[0].c.dealType,startDate:starts[0]||"",endDate:ends.length?ends[ends.length-1]:""};
-              u.lp=computeLifetimePacing(synth,delivered,goalNum)||{pct:goalNum>0?delivered/goalNum:0,color:"#bfe3da",label:"",expected:0,timeFrac:null,delivered,goal:goalNum,unit:"$",metricKind:"spend",hasDates:!!(starts[0]&&ends.length),daysLeft:null,ended:false};
-              u.delivered=delivered; u.goalNum=goalNum; u.isOff=m.every(x=>x.isOff);
+              // Combined pacing comes from groupStats (ALL members), NOT the visible rows — otherwise the
+              // Trouble filter (which hides on-pace members) would make the header rollup read as just the one
+              // behind line (Austin's 12.2%-vs-31.5% bug). Fall back to summing visible rows only if the group
+              // somehow isn't in the memo (non-spend group, etc.).
+              const gs = groupStats[u.key];
+              if(gs){ u.lp=gs.lp; u.delivered=gs.delivered; u.goalNum=gs.goal; u.isOff=gs.allOff; u._stats=gs; }
+              else {
+                const delivered=m.reduce((s,x)=>s+(x.delivered||0),0);
+                const goalNum=m.reduce((s,x)=>s+(x.goalNum||0),0);
+                const starts=m.map(x=>x.c.startDate).filter(Boolean).sort();
+                const ends=m.map(x=>x.c.endDate).filter(Boolean).sort();
+                const synth={platform:m[0].c.platform,dealType:m[0].c.dealType,startDate:starts[0]||"",endDate:ends.length?ends[ends.length-1]:""};
+                u.lp=computeLifetimePacing(synth,delivered,goalNum)||{pct:goalNum>0?delivered/goalNum:0,color:"#bfe3da",label:"",expected:0,timeFrac:null,delivered,goal:goalNum,unit:"$",metricKind:"spend",hasDates:!!(starts[0]&&ends.length),daysLeft:null,ended:false};
+                u.delivered=delivered; u.goalNum=goalNum; u.isOff=m.every(x=>x.isOff);
+              }
             });
             const uBucket = u => u.isOff ? "off" : ((u.delivered||0)<=0 ? "nodata" : ((u.lp.pct<1 && /Behind|Missed|short/i.test(u.lp.label||"")) ? "behind" : ((u.lp.pct>=1 || /Ahead|Goal hit|at goal/i.test(u.lp.label||"")) ? "ahead" : "ontrack")));
             // "Groups only" button is tri-state: "only" = just the pacing groups (hide standalone lines),
@@ -12852,12 +12905,16 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
               const lp=u.lp, col=lmC(lp.color), open=!groupCollapsed.has(u.key);
               // How much of the GROUP is actually in trouble — so Austin can tell "the whole group is behind"
               // from "just one line drags the rollup." Count member lines that are individually at-risk.
-              const memAtRisk=u.members.filter(m=>atRiskOf(m)).length, memTot=u.members.length;
+              // Member counts + daily/yesterday sums come from the FULL group (groupStats), not the visible
+              // rows — so "N/M behind" and the daily-budget figures don't shrink when the Trouble filter hides
+              // the on-pace members. Falls back to visible rows for a non-memo (non-spend) group.
+              const _gs=u._stats;
+              const memAtRisk=_gs?_gs.behindCount:u.members.filter(m=>atRiskOf(m)).length, memTot=_gs?_gs.total:u.members.length;
               const _allBehind=memAtRisk>0&&memAtRisk===memTot;
               const _trCol=_allBehind?"#ef4444":"#f59e0b";
               const expPct=lp.timeFrac!=null?Math.min(100,lp.timeFrac*100):null;
-              const dailyBudSum=u.members.reduce((s,x)=>s+(parseFloat(x.c.tvsciDailyBudget)||0),0);
-              const yestSum=u.members.reduce((s,x)=>s+(parseFloat(x.c.tvsciYesterdaySpend)||0),0);
+              const dailyBudSum=_gs?_gs.dailyBud:u.members.reduce((s,x)=>s+(parseFloat(x.c.tvsciDailyBudget)||0),0);
+              const yestSum=_gs?_gs.yest:u.members.reduce((s,x)=>s+(parseFloat(x.c.tvsciYesterdaySpend)||0),0);
               const remaining=Math.max(0,(u.goalNum||0)-(u.delivered||0));
               const dLeft=(lp.daysLeft!=null&&lp.daysLeft>0)?lp.daysLeft:null;
               const npd=(dLeft&&u.goalNum>0)?Math.round(remaining/Math.max(1,dLeft-1)):null;
@@ -12877,7 +12934,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
                   <div style={{minWidth:0,position:"sticky",left:0,zIndex:2,background:hb,boxShadow:`6px 0 8px -6px rgba(0,0,0,${lightMode?0.16:0.55})`,display:"flex",alignItems:"center",gap:6}}>
                     <button onClick={()=>toggleGroup(u.key)} style={{background:"none",border:"none",padding:0,cursor:"pointer",color:GACC,fontSize:12,fontWeight:700,flexShrink:0,transform:open?"rotate(90deg)":"none",transition:"transform .15s"}}>▸</button>
                     <span style={{fontSize:15,fontWeight:800,color:lightMode?"#0b3a46":"#d6f6ff",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}} title={u.key}>{u.key}</span>
-                    <span style={{flexShrink:0,fontSize:9,fontWeight:700,color:GACC,background:GACC+(lightMode?"18":"26"),border:`1px solid ${GACC}55`,borderRadius:3,padding:"0 5px"}}>{u.members.length} lines</span>
+                    <span style={{flexShrink:0,fontSize:9,fontWeight:700,color:GACC,background:GACC+(lightMode?"18":"26"),border:`1px solid ${GACC}55`,borderRadius:3,padding:"0 5px"}}>{memTot} lines</span>
                     {memAtRisk>0 && <span title={_allBehind?`All ${memTot} lines in this group are pacing behind — the whole group is in trouble.`:`${memAtRisk} of ${memTot} lines are pacing behind — the rest are on pace. Expand to see which.`}
                       style={{flexShrink:0,fontSize:9,fontWeight:800,color:lmC(_trCol),background:_trCol+(lightMode?"18":"26"),border:`1px solid ${_trCol}66`,borderRadius:3,padding:"0 5px",whiteSpace:"nowrap"}}>⚠ {memTot===1?"":_allBehind?`all ${memTot} `:`${memAtRisk}/${memTot} `}behind</span>}
                   </div>
@@ -28170,6 +28227,7 @@ export default function App() {
             unmappedSpend={tvsciUnmapped} onMapUnmapped={mapUnmappedSpend}
             quickCheckInPanel={quickCheckIn ? <QuickCheckInPanel campaigns={campaigns} archive={archive} setArchive={setArchive} filtered={filtered} setCampaigns={setCampaigns} onClose={()=>{setQuickCheckIn(false);setTvsciMapFile(null);}} autoLoadFile={pendingCheckinFile || tvsciMapFile} onAutoLoadConsumed={()=>{ if(tvsciMapFile) setTvsciMapFile(null); else consumePendingCheckin(); }}/> : null}
             onActivate={(id)=>setCampaigns(cs=>cs.map(c=>c.id===id?{...c,status:"active"}:c))}
+            onMarkReviewed={(id)=>setCampaigns(cs=>cs.map(c=>c.id===id?{...c,lastChecked:getToday()}:c))}
             onSetStatus={(id, status) => {
               // Pausing/activating moves the campaign between pacing sections (active list ↔ "off" list),
               // so the list height changes and the clicked button unmounts — the browser would jump to the
