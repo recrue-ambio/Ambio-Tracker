@@ -9861,8 +9861,38 @@ function quietAdsForReport(cr) {
   return out;
 }
 
+// Recompute a campaign's TVsci spend fields from the cached Spend CSV + the CURRENT saved mappings — used by
+// the manual "✕ unmap this line" so the inflated spend drops immediately, without waiting for the next sync.
+// Mirrors the sync's ARCHIVED-guard (a finished flight's line doesn't count when a live line also maps).
+// Returns the new tvsci* fields, or null when the cached CSV can't cover the remaining lines (leave as-is).
+function recomputeTvsciSpendFields(campId){
+  try{
+    const sm = JSON.parse(localStorage.getItem(CSV_MAPPINGS_KEY)||"{}")||{};
+    const want = new Set();
+    for(const [k,v] of Object.entries(sm)){
+      if(v && String(v.campId)===String(campId) && (k.startsWith("TVsci Spend||")||k.startsWith("TVsci Daily||")))
+        want.add(String(v.csvName||k.split("||")[1]||"").trim().toLowerCase());
+    }
+    if(!want.size) return { tvsciLifetimeSpend:"", tvsciDailyBudget:"", tvsciYesterdaySpend:"", tvsciTodaySpend:"" }; // nothing left mapped → clear
+    const csv = localStorage.getItem("tvsci-cached-csv")||"";
+    if(!csv) return null;
+    const num = v => parseFloat(String(v??"").replace(/[$,\s]/g,""))||0;
+    const rows=[];
+    parseCsvRows(csv).forEach(r=>{
+      const nm=String(r["Campaign Name"]||"").trim().toLowerCase(); if(!nm||!want.has(nm)) return;
+      const st=String(r["Campaign Status"]||r["Status"]||"").trim().toLowerCase();
+      rows.push({ life:num(r["Lifetime Spend"]), daily:num(r["Campaign Daily Budget"]), yest:num(r["Yesterday Spend"]), today:num(r["Today Spend"]), ended:/archiv|complete|ended|finished/.test(st) });
+    });
+    if(!rows.length) return null;
+    const hasLive = rows.some(r=>!r.ended);
+    const use = hasLive ? rows.filter(r=>!r.ended) : rows;
+    const b={life:0,daily:0,yest:0,today:0}; use.forEach(r=>{ b.life+=r.life; b.daily+=r.daily; b.yest+=r.yest; b.today+=r.today; });
+    return { tvsciLifetimeSpend:b.life.toFixed(2), tvsciDailyBudget:b.daily.toFixed(2), tvsciYesterdaySpend:b.yest.toFixed(2), tvsciTodaySpend:b.today.toFixed(2) };
+  }catch{ return null; }
+}
+
 // ─── Pacing Dashboard ─────────────────────────────────────────────────────
-function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=()=>{}, lightMode=false, onEdit=()=>{}, onClearMetrics=()=>{}, onActivate=()=>{}, onSetStatus=()=>{}, onReassignLine=()=>{}, onClearLine=()=>{}, quickCheckIn=false, onToggleQuickCheckIn=()=>{}, quickCheckInPanel=null, monthResetAvailable=false, onCloseMonth=()=>{}, focusRequest=null, unmappedSpend=[], onMapUnmapped=()=>{}, onMarkReviewed=()=>{} }) {
+function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=()=>{}, lightMode=false, onEdit=()=>{}, onClearMetrics=()=>{}, onActivate=()=>{}, onSetStatus=()=>{}, onReassignLine=()=>{}, onClearLine=()=>{}, quickCheckIn=false, onToggleQuickCheckIn=()=>{}, quickCheckInPanel=null, monthResetAvailable=false, onCloseMonth=()=>{}, focusRequest=null, unmappedSpend=[], onMapUnmapped=()=>{}, onMarkReviewed=()=>{}, onUnmapTvsciLine=()=>{} }) {
   // ── Reassign-line modal state ──
   // When the user clicks the ↪ icon on a breakdown line, we open a search modal
   // that lets them move that line's data to a different campaign without redoing QCI.
@@ -9898,6 +9928,19 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
         const seen = m[id]=m[id]||[];
         if(!seen.some(x=>x.toLowerCase()===String(name).toLowerCase())) seen.push(name);
       });
+    }catch{}
+    return m;
+  }, [campaigns]);
+  // Per-line SPEND from the cached Ambio Spend Report — lets the "Mapped from" panel show each mapped source
+  // line's own $ (lifetime/daily/yest/today) + status, so a mismapping (and how the totals would change if you
+  // move/clear a line) is obvious (Austin). Keyed by lowercased line name.
+  const tvsciSpendByLine = React.useMemo(()=>{
+    const m={};
+    try{
+      const csv=localStorage.getItem("tvsci-cached-csv")||""; if(!csv) return m;
+      const num = v => parseFloat(String(v??"").replace(/[$,\s]/g,""))||0;
+      parseCsvRows(csv).forEach(r=>{ const n=String(r["Campaign Name"]||"").trim(); if(!n) return;
+        m[n.toLowerCase()]={ life:num(r["Lifetime Spend"]), daily:num(r["Campaign Daily Budget"]), yest:num(r["Yesterday Spend"]), today:num(r["Today Spend"]), status:String(r["Campaign Status"]||r["Status"]||"").trim() }; });
     }catch{}
     return m;
   }, [campaigns]);
@@ -11495,6 +11538,38 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   const GRID_SPEND = "minmax(260px,1fr) 66px minmax(190px,0.8fr) 92px 140px 84px 84px 104px 84px 60px";
 
   function TableRow({c,disp,pacing,monthlyGoal,flightChart,spendOnly,groupMember}){
+    // Per-line TVsci "Mapped from" table (Austin): each mapped source line with its OWN spend (from the cached
+    // report) + Move (reassign the line to the right campaign) + ✕ Clear (unmap + ignore). Makes a mismapping
+    // obvious and shows how the totals shift if a line is moved/dropped. Used by both the Spend + Metrics panels.
+    const mappedLineTable = (camp, nm, money=(x=>"$"+Math.round(x||0).toLocaleString("en-US"))) => {
+      const total = nm.reduce((s,n)=>s+((tvsciSpendByLine[n.toLowerCase()]||{}).life||0),0);
+      return (
+        <div>
+          <div style={{fontSize:8.5,color:lightMode?"#789e99":"#8fb3ad",textTransform:"uppercase",letterSpacing:"0.05em",fontWeight:700,marginBottom:4}}>📄 Mapped from — {nm.length} line{nm.length!==1?"s":""} · each line's spend ↓ (↪ Move a mismap · ✕ to drop)</div>
+          <div style={{display:"flex",flexDirection:"column",gap:4}}>
+            {nm.map((n,i)=>{ const sp=tvsciSpendByLine[n.toLowerCase()]||null; const p=(total>0&&sp)?Math.round((sp.life/total)*100):null; const ended=sp&&/archiv|complete|ended|finished/i.test(sp.status);
+              return (
+                <div key={i} style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",background:lightMode?"#eef6f3":"#0b2420",border:`1px solid ${ended?(lightMode?"#fca5a5":"#7f1d1d"):(lightMode?"#cfe6df":"#17433b")}`,borderRadius:5,padding:"5px 8px"}}>
+                  <div style={{flex:"1 1 220px",minWidth:0}}>
+                    <div style={{fontSize:12.5,fontWeight:700,color:lightMode?"#0f2e2a":"#e3edec",wordBreak:"break-word"}}>{n}{ended&&<span style={{marginLeft:6,fontSize:8,fontWeight:800,color:"#ef4444",background:lightMode?"#fee2e2":"#200808",border:"1px solid #ef444460",borderRadius:3,padding:"0 4px",whiteSpace:"nowrap"}}>ENDED · not counted</span>}</div>
+                    {p!=null&&<div style={{fontSize:9,color:lightMode?"#789e99":"#8fbfb6"}}>{p}% of mapped spend</div>}
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:12,flexShrink:0,fontVariantNumeric:"tabular-nums"}}>
+                    <span style={{fontSize:13,fontWeight:800,color:lightMode?"#0f2e2a":"#e3edec",minWidth:60,textAlign:"right"}}>{sp?money(sp.life):"—"}</span>
+                    <span style={{fontSize:11,color:lightMode?"#527a75":"#8fb3ad",minWidth:56,textAlign:"right"}}>{sp&&sp.yest>0?money(sp.yest)+" yst":"—"}</span>
+                  </div>
+                  <div style={{display:"flex",gap:5,flexShrink:0}}>
+                    <button onClick={e=>{e.stopPropagation(); setReassignTarget({ isTvsciLine:true, lineName:n, fromCampaignId:camp.id, snapField:"tvsciSpend", snapKey:null, line:{ name:n, impressions:0, spend:sp?sp.life:0 } });}}
+                      title="Move this source line to the correct campaign — repoints the mapping and recomputes BOTH campaigns' spend." style={{background:"none",border:`1px solid ${lightMode?"#b6dccf":"#274642"}`,borderRadius:4,color:lightMode?"#527a75":"#d1ece5",fontSize:11,padding:"2px 8px",cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>↪ Move</button>
+                    <button onClick={e=>{e.stopPropagation(); if(typeof window!=="undefined"&&window.confirm(`Clear "${n}" from this campaign and add it to the ignore list?\n\nIts spend drops off now; future drops won't re-map it. (Undo in Quick Check-in → Ignored.)`)) onUnmapTvsciLine(camp.id, n);}}
+                      title="Unmap this line from this campaign + ignore it on future drops." style={{background:"none",border:`1px solid ${lightMode?"#fca5a5":"#7f1d1d"}`,borderRadius:4,color:lightMode?"#dc2626":"#fca5a5",fontSize:11,padding:"2px 8px",cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>✕ Clear</button>
+                  </div>
+                </div>
+              ); })}
+          </div>
+        </div>
+      );
+    };
     // Breakdown-expanded state is lifted to the parent (expandedRows Set, keyed by campaign id) so it
     // survives the row remounts that happen whenever any campaign changes — see expandedRows comment.
     // The shim preserves the existing setRowBreakdownOpen(bool) and setRowBreakdownOpen(v=>!v) calls.
@@ -12085,13 +12160,8 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
           {/* Name the spend-report LINE(S) this campaign is matched with — so a wrong mapping (e.g. the
               "Alvernia Grad" line landing on the "Alvernia UG" campaign) is obvious at a glance (Austin). */}
           {(()=>{ const nm = tvsciNamesByCamp[String(c.id)] || [];
-            if(nm.length) return (
-              <div style={{marginBottom:9}}>
-                <div style={{fontSize:8.5,color:lightMode?"#789e99":"#8fb3ad",textTransform:"uppercase",letterSpacing:"0.05em",fontWeight:700}}>📄 Mapped from</div>
-                <div style={{fontSize:13,fontWeight:700,color:lightMode?"#0f2e2a":"#e3edec",wordBreak:"break-word"}}>{nm.join("  ·  ")}</div>
-              </div>
-            );
-            return life>0 ? <div style={{fontSize:10,color:lightMode?"#97bab6":"#6f8c88",marginBottom:8,fontStyle:"italic"}}>No source line on file.</div> : null;
+            if(!nm.length) return life>0 ? <div style={{fontSize:10,color:lightMode?"#97bab6":"#6f8c88",marginBottom:8,fontStyle:"italic"}}>No source line on file.</div> : null;
+            return <div style={{marginBottom:10}}>{mappedLineTable(c, nm, money)}</div>;
           })()}
           <div style={{display:"flex",flexWrap:"wrap",gap:24,alignItems:"flex-end"}}>
             <Stat label="Lifetime spend" val={money(life)}/>
@@ -12119,10 +12189,9 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       const nm = tvsciNamesByCamp[String(c.id)] || [];
       return (
         <div style={{padding:"9px 16px 9px 42px",borderBottom:"1px solid "+lmBrdR,background:lightMode?"#e8f4ef":"#061917"}}>
-          <div style={{fontSize:8.5,color:lightMode?"#789e99":"#8fb3ad",textTransform:"uppercase",letterSpacing:"0.05em",fontWeight:700,marginBottom:2}}>📄 TVsci line mapped to this campaign</div>
           {nm.length
-            ? <div style={{fontSize:13,fontWeight:700,color:lightMode?"#0f2e2a":"#e3edec",wordBreak:"break-word"}}>{nm.join("  ·  ")}</div>
-            : <div style={{fontSize:11.5,color:lightMode?"#b45309":"#f59e0b",fontStyle:"italic"}}>No TVsci source line on file — this line may not be mapped yet.</div>}
+            ? mappedLineTable(c, nm)
+            : <><div style={{fontSize:8.5,color:lightMode?"#789e99":"#8fb3ad",textTransform:"uppercase",letterSpacing:"0.05em",fontWeight:700,marginBottom:3}}>📄 TVsci line mapped to this campaign</div><div style={{fontSize:11.5,color:lightMode?"#b45309":"#f59e0b",fontStyle:"italic"}}>No TVsci source line on file — this line may not be mapped yet.</div></>}
         </div>
       );
     })()}
@@ -19225,22 +19294,39 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
     if(fileSource==="TVsci Spend"){
       const byCamp={}; const memEntries=[];
       const num = v => parseFloat(String(v??"").replace(/[$,\s]/g,""))||0;
+      // The Ambio Spend Report carries FOUR live columns per campaign: Lifetime Spend (cumulative),
+      // Campaign Daily Budget (the pacing target), Yesterday Spend and Today Spend. Sum each across a
+      // client's lines (a campaign can run several tactic lines on one platform). None touch c.spend/MTD,
+      // so the monthly P&L / FEE overage stay correct.
+      // FIRST collect every mapped row per campaign WITH its TVsci "Campaign Status", so a finished (ARCHIVED)
+      // past flight's lifetime doesn't pile onto a CURRENT campaign — the "summer (SU26) line summed onto the
+      // fall campaign" double-count that read as huge overspend (Austin/Adam, 2026-11-13).
+      const rowsByCamp={};
       Object.entries(mapping).forEach(([idxStr,campId])=>{
         if(!campId) return;
         const i=parseInt(idxStr); const row=fileRows[i]; if(!row) return;
         if(isRowIgnored(i)) return;
         const key=String(campId);
-        // The Ambio Spend Report carries FOUR live columns per campaign: Lifetime Spend (cumulative),
-        // Campaign Daily Budget (the pacing target), Yesterday Spend and Today Spend. Sum each across a
-        // client's lines (a campaign can run several tactic lines on one platform). All four are stamped
-        // onto the campaign — the yesterday/today/daily figures drive the pacing Yesterday column; none
-        // touch c.spend/MTD, so the monthly P&L / FEE overage stay correct.
-        const b = byCamp[key] || (byCamp[key]={life:0, daily:0, yest:0, today:0});
-        b.life  += num(row["Lifetime Spend"]);
-        b.daily += num(row["Campaign Daily Budget"]);
-        b.yest  += num(row["Yesterday Spend"]);
-        b.today += num(row["Today Spend"]);
+        const _status=String(row["Campaign Status"]||row["Status"]||row["campaign status"]||"").trim().toLowerCase();
+        (rowsByCamp[key]=rowsByCamp[key]||[]).push({
+          life:num(row["Lifetime Spend"]), daily:num(row["Campaign Daily Budget"]),
+          yest:num(row["Yesterday Spend"]), today:num(row["Today Spend"]),
+          ended: /archiv|complete|ended|finished/.test(_status),
+        });
         memEntries.push({ csvName:getCampName(row,fileSource), campId:key, campName:fullPool.find(c=>String(c.id)===key)?.campaignName||"" });
+      });
+      // Aggregate, dropping ENDED lines from a current campaign when a live line also maps. Keep everything
+      // when the tracker campaign is itself archived (closeout) OR when the ONLY line(s) mapped are ended
+      // (the campaign's own flight just finished) — so no real spend is ever lost.
+      let _skipLines=0, _skipSpend=0;
+      Object.entries(rowsByCamp).forEach(([key,rws])=>{
+        const targetArchived = (typeof allArchivedIds!=="undefined") && allArchivedIds.has(key);
+        const hasLive = rws.some(r=>!r.ended);
+        const useRows = (!targetArchived && hasLive) ? rws.filter(r=>!r.ended) : rws;
+        rws.forEach(r=>{ if(!useRows.includes(r)){ _skipLines++; _skipSpend+=r.life; } });
+        const b={life:0,daily:0,yest:0,today:0};
+        useRows.forEach(r=>{ b.life+=r.life; b.daily+=r.daily; b.yest+=r.yest; b.today+=r.today; });
+        byCamp[key]=b;
       });
       const keys=Object.keys(byCamp);
       if(!keys.length){ setSavedMsg("Map at least one row to a campaign before applying."); return; }
@@ -19262,7 +19348,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
       if(typeof setArchive==="function") setArchive(as=>as.map(stampLife));
       if(memEntries.length) persistNameMappings(fileSource, memEntries);
       const total=keys.reduce((s,k)=>s+byCamp[k].life,0);
-      setSavedMsg(`📺 Saved TVsci spend to ${keys.length} campaign${keys.length!==1?"s":""} · $${total.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})} lifetime + daily budget / yesterday / today — monthly P&L untouched`);
+      setSavedMsg(`📺 Saved TVsci spend to ${keys.length} campaign${keys.length!==1?"s":""} · $${total.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})} lifetime + daily budget / yesterday / today — monthly P&L untouched${_skipLines?` · ⏭ skipped ${_skipLines} ended/archived line${_skipLines!==1?"s":""} ($${Math.round(_skipSpend).toLocaleString()}) so a finished flight doesn't inflate a current campaign`:""}`);
       setFileRows(null); setRowOrder(null); setMapping({}); setMatchConf({}); setMemoryMap({}); setConfirmApplyPending(false); setRowSearch("");
       return;
     }
@@ -26190,6 +26276,25 @@ export default function App() {
   // and the next Quick Check-in both route to the corrected campaign. Clearing the "last auto-applied" stamp
   // lets the next sync re-derive EXACT per-campaign totals from the repointed memory (handles the rare case
   // where the source held more than the one mis-mapped line).
+  // Move ONE mismapped TVsci source LINE to the correct campaign (vs moveTvsciSpend which moves a whole
+  // campaign's spend). Repoints just that line's mapping (both Spend+Daily prefixes), then recomputes BOTH
+  // campaigns' spend from their remaining mapped lines in the cached report (Austin: per-line move).
+  function moveTvsciLine(fromCampaignId, csvName, toCampaignId){
+    const lc=String(csvName||"").trim().toLowerCase(); if(!lc||!toCampaignId||String(fromCampaignId)===String(toCampaignId)) return;
+    const toCamp=[...campaigns, ...archive].find(c=>String(c.id)===String(toCampaignId));
+    try{
+      const sm=JSON.parse(localStorage.getItem(CSV_MAPPINGS_KEY)||"{}")||{};
+      ["TVsci Spend","TVsci Daily"].forEach(pref=>{ const k=`${pref}||${lc}`; if(sm[k]) sm[k]={...sm[k], campId:String(toCampaignId), campName:toCamp?toCamp.campaignName.trim():(sm[k].campName||""), learnedAt:getToday(), viaMove:true}; });
+      localStorage.setItem(CSV_MAPPINGS_KEY, JSON.stringify(sm));
+      localStorage.removeItem("tvsci-last-autoapplied");
+    }catch{}
+    const fFrom=recomputeTvsciSpendFields(fromCampaignId), fTo=recomputeTvsciSpendFields(toCampaignId);
+    const patch = c => String(c.id)===String(fromCampaignId) ? (fFrom?{...c,...fFrom}:c)
+                      : String(c.id)===String(toCampaignId) ? (fTo?{...c,...fTo,lastSpendSync:getToday(),status:c.status===""?"active":c.status}:c) : c;
+    setCampaigns(cs=>cs.map(patch)); if(typeof setArchive==="function") setArchive(as=>as.map(patch));
+    const fromName=([...campaigns,...archive].find(c=>String(c.id)===String(fromCampaignId))||{}).campaignName||"";
+    addLog({ type:"edited", campaignName:toCamp?toCamp.campaignName:"", partner:toCamp?toCamp.mediaPartner:"", platform:toCamp?toCamp.platform:"", detail:`Moved TVsci line "${csvName}" from ${fromName} → ${toCamp?toCamp.campaignName:""}; both spends recomputed`, campaignId:toCampaignId, prevSnapshot:null });
+  }
   function moveTvsciSpend(fromCampaignId, toCampaignId) {
     const today = getToday();
     const num = v => parseFloat(String(v??"").replace(/[$,\s]/g,""))||0;
@@ -28326,6 +28431,20 @@ export default function App() {
             quickCheckInPanel={quickCheckIn ? <QuickCheckInPanel campaigns={campaigns} archive={archive} setArchive={setArchive} filtered={filtered} setCampaigns={setCampaigns} onClose={()=>{setQuickCheckIn(false);setTvsciMapFile(null);}} autoLoadFile={pendingCheckinFile || tvsciMapFile} onAutoLoadConsumed={()=>{ if(tvsciMapFile) setTvsciMapFile(null); else consumePendingCheckin(); }}/> : null}
             onActivate={(id)=>setCampaigns(cs=>cs.map(c=>c.id===id?{...c,status:"active"}:c))}
             onMarkReviewed={(id)=>setCampaigns(cs=>cs.map(c=>c.id===id?{...c,lastChecked:getToday()}:c))}
+            onUnmapTvsciLine={(campId, csvName)=>{
+              // ✕ unmap a TVsci source line from a campaign: (1) delete its saved mapping (both Spend+Daily
+              // prefixes), (2) add it to the check-in ignore list so it won't re-map on the next drop, (3)
+              // recompute the campaign's spend from the REMAINING mapped lines right away. Fixes a double-
+              // mapped summer/duplicate line inflating the spend (Austin/Adam, 2026-11-13).
+              const lc = String(csvName||"").trim().toLowerCase(); if(!lc) return;
+              try{ const sm=JSON.parse(localStorage.getItem(CSV_MAPPINGS_KEY)||"{}")||{}; delete sm[`TVsci Spend||${lc}`]; delete sm[`TVsci Daily||${lc}`]; localStorage.setItem(CSV_MAPPINGS_KEY, JSON.stringify(sm)); }catch{}
+              try{ const ig=JSON.parse(localStorage.getItem("qci-ignored-names")||"[]")||[]; if(Array.isArray(ig) && !ig.some(e=>String((e&&e.name)||"").trim().toLowerCase()===lc)){ const now=Date.now(); ig.push({name:String(csvName).trim(), addedAt:now, lastSeenAt:now}); localStorage.setItem("qci-ignored-names", JSON.stringify(ig)); } }catch{}
+              const f = recomputeTvsciSpendFields(campId);
+              const patch = c => (String(c.id)===String(campId) && f) ? {...c, ...f, lastSpendSync:getToday()} : c;
+              setCampaigns(cs=>cs.map(patch));
+              if(typeof setArchive==="function") setArchive(as=>as.map(patch));
+              addLog({ type:"edited", campaignName:(campaigns.find(c=>String(c.id)===String(campId))||{}).campaignName||"", partner:"", platform:"", detail:`Unmapped TVsci line "${csvName}" + ignored it`, campaignId:campId, prevSnapshot:null });
+            }}
             onSetStatus={(id, status) => {
               // Pausing/activating moves the campaign between pacing sections (active list ↔ "off" list),
               // so the list height changes and the clicked button unmounts — the browser would jump to the
@@ -28338,7 +28457,7 @@ export default function App() {
               if(typeof window!=="undefined" && typeof requestAnimationFrame==="function")
                 requestAnimationFrame(()=>requestAnimationFrame(()=>window.scrollTo(0, sy)));
             }}
-            onReassignLine={(target, toCampaignId) => (target && target.isTvsciSpend) ? moveTvsciSpend(target.fromCampaignId, toCampaignId) : reassignBreakdownLine(target, toCampaignId)}
+            onReassignLine={(target, toCampaignId) => (target && target.isTvsciLine) ? moveTvsciLine(target.fromCampaignId, target.lineName, toCampaignId) : (target && target.isTvsciSpend) ? moveTvsciSpend(target.fromCampaignId, toCampaignId) : reassignBreakdownLine(target, toCampaignId)}
             onClearLine={(target) => clearBreakdownLine(target)}
             onEdit={(camp)=>{ setEditInitialTab("details"); setEditTarget(camp); }}
             onClearMetrics={(id)=>{
