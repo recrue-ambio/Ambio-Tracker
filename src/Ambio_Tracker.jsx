@@ -11554,9 +11554,20 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
                     <div style={{fontSize:12.5,fontWeight:700,color:lightMode?"#0f2e2a":"#e3edec",wordBreak:"break-word"}}>{n}{ended&&<span style={{marginLeft:6,fontSize:8,fontWeight:800,color:"#ef4444",background:lightMode?"#fee2e2":"#200808",border:"1px solid #ef444460",borderRadius:3,padding:"0 4px",whiteSpace:"nowrap"}}>ENDED · not counted</span>}</div>
                     {p!=null&&<div style={{fontSize:9,color:lightMode?"#789e99":"#8fbfb6"}}>{p}% of mapped spend</div>}
                   </div>
-                  <div style={{display:"flex",alignItems:"center",gap:12,flexShrink:0,fontVariantNumeric:"tabular-nums"}}>
-                    <span style={{fontSize:13,fontWeight:800,color:lightMode?"#0f2e2a":"#e3edec",minWidth:60,textAlign:"right"}}>{sp?money(sp.life):"—"}</span>
-                    <span style={{fontSize:11,color:lightMode?"#527a75":"#8fb3ad",minWidth:56,textAlign:"right"}}>{sp&&sp.yest>0?money(sp.yest)+" yst":"—"}</span>
+                  <div style={{display:"flex",alignItems:"flex-start",gap:18,flexShrink:0,fontVariantNumeric:"tabular-nums"}}>
+                    {(()=>{ const yPct = (sp&&sp.daily>0&&sp.yest>0)?(sp.yest/sp.daily):null;
+                      const yCol = yPct==null?null:yPct>=0.7?(lightMode?"#047857":"#00d48a"):yPct>=0.4?(lightMode?"#b45309":"#f59e0b"):(lightMode?"#dc2626":"#ef4444");
+                      return [
+                        {l:"Lifetime spend", v: sp?money(sp.life):"—"},
+                        {l:"Daily budget",   v: sp&&sp.daily>0?money(sp.daily):"—"},
+                        {l:"Yesterday",      v: sp&&sp.yest>0?(money(sp.yest)+(yPct!=null?` · ${Math.round(yPct*100)}%`:"")):"—", c:yCol},
+                        {l:"Today so far",   v: sp&&sp.today>0?money(sp.today):"—"},
+                      ].map((m,mi)=>(
+                        <div key={mi} style={{display:"flex",flexDirection:"column",gap:1,minWidth:56}}>
+                          <span style={{fontSize:8,textTransform:"uppercase",letterSpacing:"0.04em",color:lightMode?"#789e99":"#8fb3ad",fontWeight:700,whiteSpace:"nowrap"}}>{m.l}</span>
+                          <span style={{fontSize:12.5,fontWeight:800,color:m.c||(lightMode?"#0f2e2a":"#e3edec"),whiteSpace:"nowrap"}}>{m.v}</span>
+                        </div>
+                      )); })()}
                   </div>
                   <div style={{display:"flex",gap:5,flexShrink:0}}>
                     <button onClick={e=>{e.stopPropagation(); setReassignTarget({ isTvsciLine:true, lineName:n, fromCampaignId:camp.id, snapField:"tvsciSpend", snapKey:null, line:{ name:n, impressions:0, spend:sp?sp.life:0 } });}}
@@ -12161,23 +12172,8 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
               "Alvernia Grad" line landing on the "Alvernia UG" campaign) is obvious at a glance (Austin). */}
           {(()=>{ const nm = tvsciNamesByCamp[String(c.id)] || [];
             if(!nm.length) return life>0 ? <div style={{fontSize:10,color:lightMode?"#97bab6":"#6f8c88",marginBottom:8,fontStyle:"italic"}}>No source line on file.</div> : null;
-            return <div style={{marginBottom:10}}>{mappedLineTable(c, nm, money)}</div>;
+            return mappedLineTable(c, nm, money);
           })()}
-          <div style={{display:"flex",flexWrap:"wrap",gap:24,alignItems:"flex-end"}}>
-            <Stat label="Lifetime spend" val={money(life)}/>
-            <Stat label="Daily budget"  val={daily>0?money(daily):"—"}/>
-            <Stat label="Yesterday"     val={pct!=null?`${money(yest)} · ${Math.round(pct*100)}% of budget`:money(yest)} color={yCol}/>
-            <Stat label="Today so far"  val={money(today)}/>
-          </div>
-          {/* Mis-mapped spend? Move it to the correct campaign — this also repoints the saved mapping so the
-              auto-sync + next check-in route there too (no per-line snapshot for spend, so this is the fix). */}
-          {life>0 && (
-            <button onClick={()=>setReassignTarget({ isTvsciSpend:true, fromCampaignId:c.id, snapField:"tvsciSpend", snapKey:null, line:{ name:"TVsci spend", impressions:0, spend:life } })}
-              title="Mapped to the wrong campaign? Move this TVsci spend to the correct one — the saved mapping updates too, so future syncs and check-ins follow."
-              style={{marginTop:10,background:"none",border:`1px solid ${lightMode?"#b6dccf":"#274642"}`,borderRadius:5,color:lightMode?"#527a75":"#d1ece5",fontSize:11,padding:"4px 10px",cursor:"pointer",fontWeight:600}}>
-              ↪ Move spend to another campaign
-            </button>
-          )}
         </div>
       );
     })()}
