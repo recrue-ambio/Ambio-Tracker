@@ -29,7 +29,7 @@ const localStorage = (function(real){
 
 // Tracker build version — shown in a small footer badge so Austin can confirm which build is live. BUMP this
 // on every deploy (next letter same day, next date otherwise).
-const APP_VERSION = "v11/16/2026b";
+const APP_VERSION = "v11/16/2026c";
 const STORAGE_KEY = "campaign-tracker-v3";
 const ZEUS_KEY = "campaign-tracker-zeus";
 const EXPORT_KEY = "campaign-tracker-last-export";
@@ -913,11 +913,58 @@ function pickTvsciSpendRows(rows){
   return live.length ? live : rows;
 }
 
+// Parse a term/season tag out of a TVsci source-line name — "(SU26)", "(F26)", "(SP/SU26)", "(Fall26)" — and
+// return the rough calendar window that term covers, as [startISO, endISO]. Windows are GENEROUS so a legit
+// in-season line never gets false-flagged; the point is only to catch a CLEAR mismatch (a summer "(SU26)" line
+// mapped onto a Nov–Apr fall flight). Returns null when there's no parseable tag. Used to spot an off-season
+// mismap in the "Mapped from" breakdown (Austin: fall lines still pulling an inactive summer campaign's spend).
+function tvsciTermRange(name){
+  const m = String(name||"").match(/\(([^)]*?)(\d{2})\)/);   // first "(..NN)" group, NN = 2-digit year
+  if(!m) return null;
+  const tag = m[1].toLowerCase(), yr = 2000 + parseInt(m[2],10);
+  // Pick the LAST season token in the tag so "(SP/SU26)" reads as summer (its later edge).
+  let season = null;
+  for(const t of tag.split(/[^a-z]+/)){
+    if(/^(sp|spr|spring)$/.test(t)) season="sp";
+    else if(/^(su|sum|summer)$/.test(t)) season="su";
+    else if(/^(f|fa|fall|aut|autumn)$/.test(t)) season="fa";
+    else if(/^(w|win|winter)$/.test(t)) season="wi";
+  }
+  if(!season) return null;
+  const iso=(y,mo,d)=>`${y}-${String(mo).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+  switch(season){
+    case "sp": return [iso(yr,1,1),  iso(yr,6,30)];           // spring: Jan–Jun
+    case "su": return [iso(yr,5,1),  iso(yr,9,30)];           // summer: May–Sep
+    case "fa": return [iso(yr,8,1),  iso(yr+1,1,31)];         // fall: Aug–Jan
+    case "wi": return [iso(yr,11,1), iso(yr+1,3,31)];         // winter: Nov–Mar
+  }
+  return null;
+}
+// True unless the source line carries a term tag that CLEARLY doesn't overlap the campaign's flight. Fail-safe:
+// no tag, no/invalid flight dates, or any overlap → true (treated as fitting), so this only ever flags an
+// obvious off-season mismap, never hides a legit line.
+function tvsciLineSeasonFits(lineName, startISO, endISO){
+  const range = tvsciTermRange(lineName);
+  if(!range) return true;
+  const s = String(startISO||"").slice(0,10), e = String(endISO||"").slice(0,10);
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(s) || !/^\d{4}-\d{2}-\d{2}$/.test(e)) return true;
+  return !(range[1] < s || range[0] > e);   // ranges overlap?
+}
+// The rows that COUNT toward a campaign's TVsci spend total: drop any whose term tag puts them in a different
+// season than the campaign's flight (an off-season mismap — Austin chose "auto-drop but still show it"), THEN
+// apply the prefer-active guard. If every mapped row is off-season the campaign correctly totals $0 — the row
+// still appears in the breakdown, badged "not counted". Each row needs `name` + lowercased `status` + `ended`.
+function countedTvsciSpendRows(rows, startISO, endISO){
+  if(!Array.isArray(rows)) return [];
+  const inSeason = rows.filter(r => r && tvsciLineSeasonFits(r.name, startISO, endISO));
+  return pickTvsciSpendRows(inSeason);
+}
+
 // Background TVsci auto-apply: from a fetched spend CSV + the check-in name-memory, build per-campaign summed
 // spend {life,daily,yest,today} for ONLY the lines whose campaign mapping is already saved (remembered). New /
 // unmapped lines are skipped — they still wait for manual review in the Quick Check-in. Spend-only fields, so
 // no P&L impact. Keyed exactly like makeNameKey("TVsci Spend", Campaign Name) so it matches saved mappings.
-function tvsciAutoApplyUpdates(csv, savedMappings){
+function tvsciAutoApplyUpdates(csv, savedMappings, campDatesById){
   const num = v => parseFloat(String(v==null?"":v).replace(/[$,\s]/g,""))||0;
   // Collect rows per campaign WITH its "Campaign Status", then drop a finished (ARCHIVED) line's lifetime when a
   // LIVE line for the same campaign also maps — the SAME guard as the manual Spend apply, so this background
@@ -932,11 +979,14 @@ function tvsciAutoApplyUpdates(csv, savedMappings){
     if(!entry || !entry.campId) return;
     const id = String(entry.campId);
     const status = String(row["Campaign Status"]||row["Status"]||"").trim().toLowerCase();
-    (rowsByCamp[id]=rowsByCamp[id]||[]).push({ life:num(row["Lifetime Spend"]), daily:num(row["Campaign Daily Budget"]), yest:num(row["Yesterday Spend"]), today:num(row["Today Spend"]), status, ended:/archiv|complete|ended|finished/.test(status) });
+    (rowsByCamp[id]=rowsByCamp[id]||[]).push({ name, life:num(row["Lifetime Spend"]), daily:num(row["Campaign Daily Budget"]), yest:num(row["Yesterday Spend"]), today:num(row["Today Spend"]), status, ended:/archiv|complete|ended|finished/.test(status) });
   });
   const byCamp = {};
   Object.entries(rowsByCamp).forEach(([id,rws])=>{
-    const useRows = pickTvsciSpendRows(rws);
+    // When the caller supplies the campaign's flight dates, also drop off-season lines (a summer "(SU26)" line
+    // still sitting on a fall flight); otherwise fall back to the prefer-active guard alone.
+    const dates = campDatesById && campDatesById[id];
+    const useRows = dates ? countedTvsciSpendRows(rws, dates.start, dates.end) : pickTvsciSpendRows(rws);
     const b={life:0,daily:0,yest:0,today:0};
     useRows.forEach(r=>{ b.life+=r.life; b.daily+=r.daily; b.yest+=r.yest; b.today+=r.today; });
     byCamp[id]=b;
@@ -9914,15 +9964,21 @@ function recomputeTvsciSpendFields(campId){
     if(!want.size) return { tvsciLifetimeSpend:"", tvsciDailyBudget:"", tvsciYesterdaySpend:"", tvsciTodaySpend:"" }; // nothing left mapped → clear
     const csv = localStorage.getItem("tvsci-cached-csv")||"";
     if(!csv) return null;
+    // This campaign's flight dates (live or archived) so an off-season mapped line is dropped from the recompute too.
+    let cStart="", cEnd="";
+    try{
+      const _all=[...(JSON.parse(localStorage.getItem(STORAGE_KEY)||"[]")||[]), ...(JSON.parse(localStorage.getItem(ARCHIVE_KEY)||"[]")||[])];
+      const _c=_all.find(c=>c&&String(c.id)===String(campId)); if(_c){ cStart=_c.startDate; cEnd=_c.endDate; }
+    }catch{}
     const num = v => parseFloat(String(v??"").replace(/[$,\s]/g,""))||0;
     const rows=[];
     parseCsvRows(csv).forEach(r=>{
-      const nm=String(r["Campaign Name"]||"").trim().toLowerCase(); if(!nm||!want.has(nm)) return;
+      const rawName=String(r["Campaign Name"]||"").trim(); const nm=rawName.toLowerCase(); if(!nm||!want.has(nm)) return;
       const st=String(r["Campaign Status"]||r["Status"]||"").trim().toLowerCase();
-      rows.push({ life:num(r["Lifetime Spend"]), daily:num(r["Campaign Daily Budget"]), yest:num(r["Yesterday Spend"]), today:num(r["Today Spend"]), status:st, ended:/archiv|complete|ended|finished/.test(st) });
+      rows.push({ name:rawName, life:num(r["Lifetime Spend"]), daily:num(r["Campaign Daily Budget"]), yest:num(r["Yesterday Spend"]), today:num(r["Today Spend"]), status:st, ended:/archiv|complete|ended|finished/.test(st) });
     });
     if(!rows.length) return null;
-    const use = pickTvsciSpendRows(rows);
+    const use = countedTvsciSpendRows(rows, cStart, cEnd);
     const b={life:0,daily:0,yest:0,today:0}; use.forEach(r=>{ b.life+=r.life; b.daily+=r.daily; b.yest+=r.yest; b.today+=r.today; });
     return { tvsciLifetimeSpend:b.life.toFixed(2), tvsciDailyBudget:b.daily.toFixed(2), tvsciYesterdaySpend:b.yest.toFixed(2), tvsciTodaySpend:b.today.toFixed(2) };
   }catch{ return null; }
@@ -11593,16 +11649,22 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     // report) + Move (reassign the line to the right campaign) + ✕ Clear (unmap + ignore). Makes a mismapping
     // obvious and shows how the totals shift if a line is moved/dropped. Used by both the Spend + Metrics panels.
     const mappedLineTable = (camp, nm, money=(x=>"$"+Math.round(x||0).toLocaleString("en-US"))) => {
-      const total = nm.reduce((s,n)=>s+((tvsciSpendByLine[n.toLowerCase()]||{}).life||0),0);
+      // "% of mapped spend" is over the lines that actually COUNT — excluding ended/archived and off-season
+      // lines, which are dropped from the campaign total (so the percentages match the Lifetime-spend stat).
+      const total = nm.reduce((s,n)=>{ const sp=tvsciSpendByLine[n.toLowerCase()]; if(!sp) return s;
+        const _e=/archiv|complete|ended|finished/i.test(sp.status);
+        const _o=!_e && !tvsciLineSeasonFits(n, camp.startDate, camp.endDate);
+        return (_e||_o) ? s : s+(sp.life||0); },0);
       return (
         <div>
           <div style={{fontSize:8.5,color:lightMode?"#789e99":"#8fb3ad",textTransform:"uppercase",letterSpacing:"0.05em",fontWeight:700,marginBottom:4}}>📄 Mapped from — {nm.length} line{nm.length!==1?"s":""} · each line's spend ↓ (↪ Move a mismap · ✕ to drop)</div>
           <div style={{display:"flex",flexDirection:"column",gap:4}}>
             {nm.map((n,i)=>{ const sp=tvsciSpendByLine[n.toLowerCase()]||null; const p=(total>0&&sp)?Math.round((sp.life/total)*100):null; const ended=sp&&/archiv|complete|ended|finished/i.test(sp.status);
+              const offSeason = !ended && !tvsciLineSeasonFits(n, camp.startDate, camp.endDate);  // term tag (SU26…) outside this flight
               return (
-                <div key={i} style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",background:lightMode?"#eef6f3":"#0b2420",border:`1px solid ${ended?(lightMode?"#fca5a5":"#7f1d1d"):(lightMode?"#cfe6df":"#17433b")}`,borderRadius:5,padding:"5px 8px"}}>
+                <div key={i} style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",background:lightMode?"#eef6f3":"#0b2420",border:`1px solid ${ended?(lightMode?"#fca5a5":"#7f1d1d"):offSeason?(lightMode?"#fcd34d":"#92400e"):(lightMode?"#cfe6df":"#17433b")}`,borderRadius:5,padding:"5px 8px"}}>
                   <div style={{flex:"1 1 220px",minWidth:0}}>
-                    <div style={{fontSize:12.5,fontWeight:700,color:lightMode?"#0f2e2a":"#e3edec",wordBreak:"break-word"}}>{n}{ended&&<span style={{marginLeft:6,fontSize:8,fontWeight:800,color:"#ef4444",background:lightMode?"#fee2e2":"#200808",border:"1px solid #ef444460",borderRadius:3,padding:"0 4px",whiteSpace:"nowrap"}}>ENDED · not counted</span>}</div>
+                    <div style={{fontSize:12.5,fontWeight:700,color:lightMode?"#0f2e2a":"#e3edec",wordBreak:"break-word"}}>{n}{ended&&<span style={{marginLeft:6,fontSize:8,fontWeight:800,color:"#ef4444",background:lightMode?"#fee2e2":"#200808",border:"1px solid #ef444460",borderRadius:3,padding:"0 4px",whiteSpace:"nowrap"}}>ENDED · not counted</span>}{offSeason&&<span title="This line carries a term tag (e.g. SU26) that falls outside this campaign's flight dates — a different season's line. It's auto-dropped from this campaign's total; ↪ Move it to the right flight if the mapping is wrong." style={{marginLeft:6,fontSize:8,fontWeight:800,color:lightMode?"#b45309":"#f59e0b",background:lightMode?"#fef3c7":"#2a1c05",border:"1px solid #f59e0b60",borderRadius:3,padding:"0 4px",whiteSpace:"nowrap"}}>⚠ OFF-SEASON · not counted</span>}</div>
                     {p!=null&&<div style={{fontSize:9,color:lightMode?"#789e99":"#8fbfb6"}}>{p}% of mapped spend</div>}
                   </div>
                   <div style={{display:"flex",alignItems:"flex-start",gap:18,flexShrink:0,fontVariantNumeric:"tabular-nums"}}>
@@ -11882,7 +11944,11 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     // per-line breakdown), so a row expands when it has synced spend data. Elsewhere it expands on
     // chart/brief/check-in data as before. Keeps the two data sources fully separated per view.
     const _hasSpendReport = (parseFloat(c.tvsciLifetimeSpend)||0) > 0 || (parseFloat(c.tvsciDailyBudget)||0) > 0 || (c.tvsciYesterdaySpend!=null && String(c.tvsciYesterdaySpend)!=="");
-    const canExpand = spendOnly ? _hasSpendReport : (!!rowBreakdown || hasWeekly || hasCreatives || primaryRaw > 0 || !!backupBreakdownByCamp[String(c.id)]);
+    // Also expandable when the line has a mapped source line even if it currently reports $0 — so a line fed
+    // only by a dormant/off-season source (e.g. a still-"ACTIVE"-in-TVsci summer "(SU26)" line) can always be
+    // opened to inspect the "Mapped from" breakdown and ↪ Move / ✕ Clear a mismap (Austin: no caret to see it).
+    const _hasMappedSource = (tvsciNamesByCamp[String(c.id)]||[]).length > 0;
+    const canExpand = spendOnly ? (_hasSpendReport || _hasMappedSource) : (!!rowBreakdown || hasWeekly || hasCreatives || primaryRaw > 0 || !!backupBreakdownByCamp[String(c.id)]);
 
     // Group members (lines rolling up to a pacing-group header) are indented + smaller + faintly tinted so they
     // read as sub-lines under their header — but keep their OWN pacing colour (green/yellow/red), not a group tint.
@@ -19356,6 +19422,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
         const key=String(campId);
         const _status=String(row["Campaign Status"]||row["Status"]||row["campaign status"]||"").trim().toLowerCase();
         (rowsByCamp[key]=rowsByCamp[key]||[]).push({
+          name: String(row["Campaign Name"]||row["campaign name"]||"").trim(),
           life:num(row["Lifetime Spend"]), daily:num(row["Campaign Daily Budget"]),
           yest:num(row["Yesterday Spend"]), today:num(row["Today Spend"]),
           status:_status, ended: /archiv|complete|ended|finished/.test(_status),
@@ -19363,12 +19430,14 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
         memEntries.push({ csvName:getCampName(row,fileSource), campId:key, campName:fullPool.find(c=>String(c.id)===key)?.campaignName||"" });
       });
       // Aggregate, preferring the ACTIVE line(s) when several sheet rows map to one current campaign (so a
-      // paused/inactive/archived duplicate never inflates it — Austin: NW Qatar). Keep everything when the
-      // tracker campaign is itself archived (a closeout) so a finished flight's own spend is never lost.
+      // paused/inactive/archived duplicate never inflates it — Austin: NW Qatar) and dropping an off-season
+      // line (a summer "(SU26)" line on a fall flight). Keep everything when the tracker campaign is itself
+      // archived (a closeout) so a finished flight's own spend is never lost.
       let _skipLines=0, _skipSpend=0;
       Object.entries(rowsByCamp).forEach(([key,rws])=>{
         const targetArchived = (typeof allArchivedIds!=="undefined") && allArchivedIds.has(key);
-        const useRows = targetArchived ? rws : pickTvsciSpendRows(rws);
+        const _camp = fullPool.find(c=>String(c.id)===key);
+        const useRows = targetArchived ? rws : countedTvsciSpendRows(rws, _camp?.startDate, _camp?.endDate);
         rws.forEach(r=>{ if(!useRows.includes(r)){ _skipLines++; _skipSpend+=r.life; } });
         const b={life:0,daily:0,yest:0,today:0};
         useRows.forEach(r=>{ b.life+=r.life; b.daily+=r.daily; b.yest+=r.yest; b.today+=r.today; });
@@ -19394,7 +19463,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
       if(typeof setArchive==="function") setArchive(as=>as.map(stampLife));
       if(memEntries.length) persistNameMappings(fileSource, memEntries);
       const total=keys.reduce((s,k)=>s+byCamp[k].life,0);
-      setSavedMsg(`📺 Saved TVsci spend to ${keys.length} campaign${keys.length!==1?"s":""} · $${total.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})} lifetime + daily budget / yesterday / today — monthly P&L untouched${_skipLines?` · ⏭ skipped ${_skipLines} ended/archived line${_skipLines!==1?"s":""} ($${Math.round(_skipSpend).toLocaleString()}) so a finished flight doesn't inflate a current campaign`:""}`);
+      setSavedMsg(`📺 Saved TVsci spend to ${keys.length} campaign${keys.length!==1?"s":""} · $${total.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})} lifetime + daily budget / yesterday / today — monthly P&L untouched${_skipLines?` · ⏭ skipped ${_skipLines} ended/archived/off-season line${_skipLines!==1?"s":""} ($${Math.round(_skipSpend).toLocaleString()}) so a finished or wrong-season flight doesn't inflate a current campaign`:""}`);
       setFileRows(null); setRowOrder(null); setMapping({}); setMatchConf({}); setMemoryMap({}); setConfirmApplyPending(false); setRowSearch("");
       return;
     }
@@ -25896,7 +25965,15 @@ export default function App() {
       let doneAt=""; try{ doneAt = localStorage.getItem("tvsci-last-autoapplied")||""; }catch{}
       if (syncAt && syncAt===doneAt) return;                 // this sync already auto-applied
       let savedMappings={}; try{ savedMappings = JSON.parse(localStorage.getItem(CSV_MAPPINGS_KEY)||"{}"); }catch{}
-      const updates = tvsciAutoApplyUpdates(csv, savedMappings);
+      // Flight dates per campaign id (live + archived) so the auto-apply can drop an off-season mismap (a summer
+      // "(SU26)" line still mapped to a fall flight). Read from storage to avoid a stale effect closure.
+      let campDatesById={};
+      try{
+        const _cs = JSON.parse(localStorage.getItem(STORAGE_KEY)||"[]");
+        const _ar = JSON.parse(localStorage.getItem(ARCHIVE_KEY)||"[]");
+        [...(Array.isArray(_cs)?_cs:[]), ...(Array.isArray(_ar)?_ar:[])].forEach(c=>{ if(c&&c.id!=null) campDatesById[String(c.id)]={start:c.startDate, end:c.endDate}; });
+      }catch{}
+      const updates = tvsciAutoApplyUpdates(csv, savedMappings, campDatesById);
       const markDone = ()=>{ try{ if(syncAt) localStorage.setItem("tvsci-last-autoapplied", syncAt); }catch{} };
       if (!Object.keys(updates).length) { markDone(); return; }   // nothing remembered matched — don't retry each load
       const asOfDate = (syncAt.match(/^\d{4}-\d{2}-\d{2}/)||[""])[0] || getToday();
