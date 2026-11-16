@@ -29,7 +29,7 @@ const localStorage = (function(real){
 
 // Tracker build version — shown in a small footer badge so Austin can confirm which build is live. BUMP this
 // on every deploy (next letter same day, next date otherwise).
-const APP_VERSION = "v11/16/2026c";
+const APP_VERSION = "v11/16/2026d";
 const STORAGE_KEY = "campaign-tracker-v3";
 const ZEUS_KEY = "campaign-tracker-zeus";
 const EXPORT_KEY = "campaign-tracker-last-export";
@@ -18752,6 +18752,11 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
     const stamp = at || new Date().toISOString();
     try{ localStorage.setItem("tvsci-last-sync", stamp); localStorage.setItem("tvsci-last-staged", stamp); }catch{}
     setLastTvsciSync(stamp);
+    // ALSO re-run the background auto-apply for already-remembered lines — otherwise a manual Sync only stages
+    // NEW lines for review and leaves mapped campaigns' spend stale until the next page load (Austin: "I synced
+    // and nothing changed" — Manor's fall line kept its old summer spend). The App-level listener recomputes
+    // every remembered line from this fresh CSV, applying the archived / prefer-active / off-season guards.
+    try{ window.dispatchEvent(new CustomEvent("tvsci-autosync", { detail:{ csv, at: stamp } })); }catch{}
   };
   async function syncTvsci(){
     let u = tvsciUrl;
