@@ -27,6 +27,9 @@ const localStorage = (function(real){
   };
 })(typeof window !== "undefined" ? window.localStorage : null);
 
+// Tracker build version — shown in a small footer badge so Austin can confirm which build is live. BUMP this
+// on every deploy (next letter same day, next date otherwise).
+const APP_VERSION = "v11/16/2026a";
 const STORAGE_KEY = "campaign-tracker-v3";
 const ZEUS_KEY = "campaign-tracker-zeus";
 const EXPORT_KEY = "campaign-tracker-last-export";
@@ -845,6 +848,19 @@ function lmBadge(c) {
 }
 
 function getToday() { return new Date().toISOString().split("T")[0]; }
+
+// Collapse any SAME-DAY metricSeries entries into one — guards against a day stored in two formats (a Daily
+// check-in writes ISO "YYYY-MM-DD" while a month-close writes slash "M/D/YYYY", which used to leave a duplicate
+// Oct-31 row — Austin). Keeps the richer reading per day (prefers one with a `t` timestamp, else the higher
+// spend/impressions). Idempotent + value-preserving for distinct days, so it's safe to run on every load.
+function dedupeMetricSeries(series){
+  if(!Array.isArray(series) || series.length < 2) return Array.isArray(series) ? series : [];
+  const key = (d)=>{ const s=String(d||""); let m=s.match(/^(\d{4})-(\d{2})-(\d{2})/); if(m) return m[1]+"-"+m[2]+"-"+m[3]; m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); if(m) return m[3]+"-"+String(m[1]).padStart(2,"0")+"-"+String(m[2]).padStart(2,"0"); return s; };
+  const score = x=> (x && x.t ? 1e12 : 0) + (parseFloat(x&&x.s)||0)*1000 + (parseInt(x&&x.i)||0);
+  const byDay = new Map();
+  series.forEach(e=>{ if(!e) return; const k=key(e.d); const prev=byDay.get(k); if(!prev || score(e) >= score(prev)) byDay.set(k, e); });
+  return byDay.size === series.length ? series : [...byDay.values()];   // unchanged ref when already clean
+}
 
 // Normalize whatever "Publish to web" link the user pastes into a link the tracker can actually fetch
 // unauthenticated: strip the /u/N/ account-index (forces a sign-in for anyone not in that Google account),
@@ -9949,8 +9965,23 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
     try{
       const csv=localStorage.getItem("tvsci-cached-csv")||""; if(!csv) return m;
       const num = v => parseFloat(String(v??"").replace(/[$,\s]/g,""))||0;
+      // Group sheet rows by line name, then aggregate with the SAME ARCHIVED-guard the sync uses — so the
+      // per-line "Mapped from" display matches the served spend, not a stray archived/last row. A line with an
+      // ACTIVE row + an ARCHIVED one shows the ACTIVE row's $ (Austin: it was showing $1,179/$76 from a stale
+      // row instead of the active $6,207/$147); multiple ACTIVE rows sum, archived-only keeps as-is.
+      const rowsByName={};
       parseCsvRows(csv).forEach(r=>{ const n=String(r["Campaign Name"]||"").trim(); if(!n) return;
-        m[n.toLowerCase()]={ life:num(r["Lifetime Spend"]), daily:num(r["Campaign Daily Budget"]), yest:num(r["Yesterday Spend"]), today:num(r["Today Spend"]), status:String(r["Campaign Status"]||r["Status"]||"").trim() }; });
+        const st=String(r["Campaign Status"]||r["Status"]||"").trim();
+        (rowsByName[n.toLowerCase()]=rowsByName[n.toLowerCase()]||[]).push({ life:num(r["Lifetime Spend"]), daily:num(r["Campaign Daily Budget"]), yest:num(r["Yesterday Spend"]), today:num(r["Today Spend"]), status:st, ended:/archiv|complete|ended|finished/i.test(st) });
+      });
+      Object.entries(rowsByName).forEach(([k,rws])=>{
+        const hasLive=rws.some(r=>!r.ended);
+        const use=hasLive?rws.filter(r=>!r.ended):rws;
+        const b={life:0,daily:0,yest:0,today:0};
+        use.forEach(r=>{ b.life+=r.life; b.daily+=r.daily; b.yest+=r.yest; b.today+=r.today; });
+        b.status = hasLive ? "ACTIVE" : ((use[0]&&use[0].status)||"");
+        m[k]=b;
+      });
     }catch{}
     return m;
   }, [campaigns]);
@@ -25815,7 +25846,7 @@ export default function App() {
   const COLS = 12;
   const { confirm, dialog, onResolve } = useConfirm();
 
-  const [campaigns, setCampaigns] = useState(()=>{ try { const s=localStorage.getItem(STORAGE_KEY); return s?JSON.parse(s):initialCampaigns; } catch { return initialCampaigns; } });
+  const [campaigns, setCampaigns] = useState(()=>{ try { const s=localStorage.getItem(STORAGE_KEY); if(!s) return initialCampaigns; const arr=JSON.parse(s); return Array.isArray(arr) ? arr.map(c=>c&&Array.isArray(c.metricSeries)&&c.metricSeries.length>1 ? {...c, metricSeries:dedupeMetricSeries(c.metricSeries)} : c) : initialCampaigns; } catch { return initialCampaigns; } });
   const [reminders, setReminders] = useState(()=>{ try { const s=localStorage.getItem(REMINDERS_KEY); return s?JSON.parse(s):[]; } catch { return []; } });
   // ── TVsci background auto-sync ── Keeps the published-sheet spend fresh without anyone clicking. Runs
   // on app open (when it's been a while) and every 3 hours: fetches the CSV, caches it + a timestamp, and
@@ -26610,7 +26641,7 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem("campaign-tracker-partner-prefixes", JSON.stringify(partnerPrefixes)); } catch {}
   }, [partnerPrefixes]);
-  const [archive, setArchive] = useState(()=>{ try { const s=localStorage.getItem(ARCHIVE_KEY); return s?JSON.parse(s):[]; } catch { return []; } });
+  const [archive, setArchive] = useState(()=>{ try { const s=localStorage.getItem(ARCHIVE_KEY); if(!s) return []; const arr=JSON.parse(s); return Array.isArray(arr) ? arr.map(c=>c&&Array.isArray(c.metricSeries)&&c.metricSeries.length>1 ? {...c, metricSeries:dedupeMetricSeries(c.metricSeries)} : c) : []; } catch { return []; } });
   const [metaSyncStatus, setMetaSyncStatus] = useState(null);
   const [metaSyncInfo,   setMetaSyncInfo]   = useState(null);
   const [ttdSyncStatus,  setTtdSyncStatus]  = useState(null);
@@ -27305,7 +27336,14 @@ export default function App() {
     //    Revenue tab reads. This is a second safety net alongside the monthly backup in step 1.
     const stamp = getToday();
     const [_py,_pm] = prevMonth.split("-").map(Number);
-    const closeStamp = (_py && _pm) ? `${String(_pm).padStart(2,"0")}/${String(new Date(_py,_pm,0).getDate()).padStart(2,"0")}/${_py}` : null;
+    const _lastDay = (_py && _pm) ? new Date(_py,_pm,0).getDate() : null;
+    const closeStamp = (_py && _pm) ? `${String(_pm).padStart(2,"0")}/${String(_lastDay).padStart(2,"0")}/${_py}` : null;
+    const closeISO   = (_py && _pm) ? `${_py}-${String(_pm).padStart(2,"0")}-${String(_lastDay).padStart(2,"0")}` : null;
+    // Canonicalize a series date (ISO "YYYY-MM-DD" OR slash "M/D/YYYY") to a YYYY-MM-DD key, so the close-day
+    // dedupe below removes a SAME-DAY entry regardless of which format it's in. (Bug: a Daily check-in stores
+    // the close day as ISO while month-close stamps it as slash, so the old `e.d === closeStamp` string match
+    // missed it and left a DUPLICATE Oct-31 entry — Austin.)
+    const _dayKey = (d)=>{ const s=String(d||""); let m=s.match(/^(\d{4})-(\d{2})-(\d{2})/); if(m) return `${m[1]}-${m[2]}-${m[3]}`; m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); if(m) return `${m[3]}-${String(m[1]).padStart(2,"0")}-${String(m[2]).padStart(2,"0")}`; return s; };
     setCampaigns(cs=>cs.map(c=>{
       let metricSeries = Array.isArray(c.metricSeries) ? c.metricSeries : [];
       if (closeStamp) {
@@ -27314,7 +27352,7 @@ export default function App() {
         const spend = parseFloat(rm.spend || c.spend) || 0;
         const views = parseInt(rm.videoViews || c.videoViews) || 0;
         if (impr > 0 || spend > 0 || views > 0) {
-          metricSeries = metricSeries.filter(e => !(e && e.d === closeStamp));
+          metricSeries = metricSeries.filter(e => !(e && _dayKey(e.d) === closeISO));   // drop ANY same-day entry, ISO or slash
           metricSeries = [...metricSeries, { d:closeStamp, i:impr, s:spend, vv:views }];
         }
       }
@@ -29587,6 +29625,8 @@ export default function App() {
         </div>
       )}
       <ConfirmDialog dialog={dialog} onResolve={onResolve}/>
+      {/* Build-version badge — small + unobtrusive, bottom-left, so you can confirm which build is live (Austin). */}
+      <div title="Tracker build version" style={{position:"fixed",left:8,bottom:5,fontSize:9,fontWeight:600,letterSpacing:"0.02em",color:lightMode?"#9cc0b8":"#3e5c57",opacity:0.6,zIndex:9990,pointerEvents:"none",fontFamily:"inherit"}}>Ambio {APP_VERSION}</div>
     </div>
   </div>
   );
