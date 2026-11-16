@@ -890,18 +890,28 @@ function parseCsvRows(text){
 // no P&L impact. Keyed exactly like makeNameKey("TVsci Spend", Campaign Name) so it matches saved mappings.
 function tvsciAutoApplyUpdates(csv, savedMappings){
   const num = v => parseFloat(String(v==null?"":v).replace(/[$,\s]/g,""))||0;
-  const byCamp = {};
+  // Collect rows per campaign WITH its "Campaign Status", then drop a finished (ARCHIVED) line's lifetime when a
+  // LIVE line for the same campaign also maps — the SAME guard as the manual Spend apply, so this background
+  // auto-sync (runs on load + every ~3h) stops re-inflating a campaign that has both an active AND an archived
+  // sheet row under one name (Austin: NW Qatar CTV/OTT = $6,207 active + an archived row summed to $11.3k). Keep
+  // everything when the ONLY rows are archived (a just-ended flight's closeout) so no real spend is ever lost.
+  const rowsByCamp = {};
   parseCsvRows(csv).forEach(row=>{
     const name = (row["Campaign Name"]||"").trim();
     if(!name) return;
     const entry = savedMappings && savedMappings[`TVsci Spend||${name.toLowerCase()}`];
     if(!entry || !entry.campId) return;
     const id = String(entry.campId);
-    const b = byCamp[id] || (byCamp[id]={life:0,daily:0,yest:0,today:0});
-    b.life  += num(row["Lifetime Spend"]);
-    b.daily += num(row["Campaign Daily Budget"]);
-    b.yest  += num(row["Yesterday Spend"]);
-    b.today += num(row["Today Spend"]);
+    const status = String(row["Campaign Status"]||row["Status"]||"").trim().toLowerCase();
+    (rowsByCamp[id]=rowsByCamp[id]||[]).push({ life:num(row["Lifetime Spend"]), daily:num(row["Campaign Daily Budget"]), yest:num(row["Yesterday Spend"]), today:num(row["Today Spend"]), ended:/archiv|complete|ended|finished/.test(status) });
+  });
+  const byCamp = {};
+  Object.entries(rowsByCamp).forEach(([id,rws])=>{
+    const hasLive = rws.some(r=>!r.ended);
+    const useRows = hasLive ? rws.filter(r=>!r.ended) : rws;
+    const b={life:0,daily:0,yest:0,today:0};
+    useRows.forEach(r=>{ b.life+=r.life; b.daily+=r.daily; b.yest+=r.yest; b.today+=r.today; });
+    byCamp[id]=b;
   });
   return byCamp;
 }
