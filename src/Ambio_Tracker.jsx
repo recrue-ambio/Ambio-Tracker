@@ -29,7 +29,7 @@ const localStorage = (function(real){
 
 // Tracker build version — shown in a small footer badge so Austin can confirm which build is live. BUMP this
 // on every deploy (next letter same day, next date otherwise).
-const APP_VERSION = "v11/16/2026d";
+const APP_VERSION = "v11/16/2026f";
 const STORAGE_KEY = "campaign-tracker-v3";
 const ZEUS_KEY = "campaign-tracker-zeus";
 const EXPORT_KEY = "campaign-tracker-last-export";
@@ -12294,20 +12294,11 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
         </div>
       );
     })()}
-    {/* TVsci source line(s) — METRICS view. A single-line TVsci campaign has no per-ad-group breakdown
-        table (no ttdSnapshots), so without this the dropdown never names the line its data came from and a
-        wrong mapping is invisible (Austin). Reverse-looked-up from the saved TVsci mappings (Spend + Daily),
-        so it works retroactively for anything already checked in — no re-QCI needed. */}
-    {!spendOnly && rowBreakdownOpen && vendorOf(c.platform)==="TVsci" && (()=>{
-      const nm = tvsciNamesByCamp[String(c.id)] || [];
-      return (
-        <div style={{padding:"9px 16px 9px 42px",borderBottom:"1px solid "+lmBrdR,background:lightMode?"#e8f4ef":"#061917"}}>
-          {nm.length
-            ? mappedLineTable(c, nm)
-            : <><div style={{fontSize:8.5,color:lightMode?"#789e99":"#8fb3ad",textTransform:"uppercase",letterSpacing:"0.05em",fontWeight:700,marginBottom:3}}>📄 TVsci line mapped to this campaign</div><div style={{fontSize:11.5,color:lightMode?"#b45309":"#f59e0b",fontStyle:"italic"}}>No TVsci source line on file — this line may not be mapped yet.</div></>}
-        </div>
-      );
-    })()}
+    {/* (Removed) The TVsci spend-report mapping lookup used to render here in the METRICS view, showing the
+        mapped SPEND line's lifetime/daily/yesterday $ — but that's spend-report data, which belongs ONLY in
+        the 💲 Spend view. Austin wants Metrics strictly the quick-check-in / TVsci TapClick (Daily) data, so
+        the per-ad-group breakdown below (rowBreakdown / month-close backup) is the only breakdown here now.
+        The spend line a campaign is matched with is still named in the Spend view's expanded panel. */}
     {/* Performance brief — plain-language 1–2 sentence summary (deterministic, no AI), first thing in the
         expanded dropdown, on demand: the dropdown shows a "📝 Generate brief" button (the user only sends
         these to clients, so it's not auto-shown on every campaign); clicking it reveals the sentence.
@@ -12984,9 +12975,15 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       // Ambio: the TVsci spend sheet writes the TOTAL lifetime spend (`tvsciLifetimeSpend`) — for a
       // spend-paced campaign that IS the cumulative delivered this view needs, so prefer it. (It never
       // touches c.spend/MTD, so the monthly P&L / FEE overage stay correct.)
+      // In the 💲 Spend view this is the ONLY source — spend-report only, matching the group rollup
+      // (groupStats sums tvsciLifetimeSpend). A spend-paced line with no synced spend reads $0 here instead
+      // of falling back to check-in delivery (Austin: fall lines that aren't live yet were showing phantom
+      // check-in spend the group total didn't count → "none of the numbers make sense"). The 📊 Metrics /
+      // ✈ Flights view (spendOnly=false) still falls back to cumulative check-in delivery.
       if (pacingMetricFor(c.platform, c.dealType) === "spend") {
         const tv = parseFloat(c.tvsciLifetimeSpend) || 0;
-        if (tv > 0) delivered = tv;
+        if (spendOnly) delivered = tv;
+        else if (tv > 0) delivered = tv;
       }
       const goalNum = parseGoalNumber(pacingGoalRaw(c));   // dollar budget for spend-paced (Ambio), else Goal
       const lp = computeLifetimePacing(c, delivered, goalNum);
