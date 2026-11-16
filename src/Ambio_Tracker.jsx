@@ -29,7 +29,7 @@ const localStorage = (function(real){
 
 // Tracker build version — shown in a small footer badge so Austin can confirm which build is live. BUMP this
 // on every deploy (next letter same day, next date otherwise).
-const APP_VERSION = "v11/16/2026a";
+const APP_VERSION = "v11/16/2026b";
 const STORAGE_KEY = "campaign-tracker-v3";
 const ZEUS_KEY = "campaign-tracker-zeus";
 const EXPORT_KEY = "campaign-tracker-last-export";
@@ -900,6 +900,19 @@ function parseCsvRows(text){
   return rows;
 }
 
+// Pick which TVsci spend-sheet rows count for a campaign when SEVERAL share its name: prefer ACTIVE rows (the
+// current line), else any non-archived (inactive/paused), else all (an archived closeout). So a stale paused or
+// archived duplicate never inflates the live campaign's spend — the tracker shows exactly the active sheet row.
+// (Austin: NW Qatar CTV/OTT had an ACTIVE $6,207.50 + a paused $1,179.50 + an archived $5,082.66, all summed.)
+// Each row must carry a lowercased `status` and an `ended` flag.
+function pickTvsciSpendRows(rows){
+  if(!Array.isArray(rows) || rows.length < 2) return rows||[];
+  const active = rows.filter(r => r && r.status === "active");
+  if(active.length) return active;
+  const live = rows.filter(r => r && !r.ended);
+  return live.length ? live : rows;
+}
+
 // Background TVsci auto-apply: from a fetched spend CSV + the check-in name-memory, build per-campaign summed
 // spend {life,daily,yest,today} for ONLY the lines whose campaign mapping is already saved (remembered). New /
 // unmapped lines are skipped — they still wait for manual review in the Quick Check-in. Spend-only fields, so
@@ -919,12 +932,11 @@ function tvsciAutoApplyUpdates(csv, savedMappings){
     if(!entry || !entry.campId) return;
     const id = String(entry.campId);
     const status = String(row["Campaign Status"]||row["Status"]||"").trim().toLowerCase();
-    (rowsByCamp[id]=rowsByCamp[id]||[]).push({ life:num(row["Lifetime Spend"]), daily:num(row["Campaign Daily Budget"]), yest:num(row["Yesterday Spend"]), today:num(row["Today Spend"]), ended:/archiv|complete|ended|finished/.test(status) });
+    (rowsByCamp[id]=rowsByCamp[id]||[]).push({ life:num(row["Lifetime Spend"]), daily:num(row["Campaign Daily Budget"]), yest:num(row["Yesterday Spend"]), today:num(row["Today Spend"]), status, ended:/archiv|complete|ended|finished/.test(status) });
   });
   const byCamp = {};
   Object.entries(rowsByCamp).forEach(([id,rws])=>{
-    const hasLive = rws.some(r=>!r.ended);
-    const useRows = hasLive ? rws.filter(r=>!r.ended) : rws;
+    const useRows = pickTvsciSpendRows(rws);
     const b={life:0,daily:0,yest:0,today:0};
     useRows.forEach(r=>{ b.life+=r.life; b.daily+=r.daily; b.yest+=r.yest; b.today+=r.today; });
     byCamp[id]=b;
@@ -9907,11 +9919,10 @@ function recomputeTvsciSpendFields(campId){
     parseCsvRows(csv).forEach(r=>{
       const nm=String(r["Campaign Name"]||"").trim().toLowerCase(); if(!nm||!want.has(nm)) return;
       const st=String(r["Campaign Status"]||r["Status"]||"").trim().toLowerCase();
-      rows.push({ life:num(r["Lifetime Spend"]), daily:num(r["Campaign Daily Budget"]), yest:num(r["Yesterday Spend"]), today:num(r["Today Spend"]), ended:/archiv|complete|ended|finished/.test(st) });
+      rows.push({ life:num(r["Lifetime Spend"]), daily:num(r["Campaign Daily Budget"]), yest:num(r["Yesterday Spend"]), today:num(r["Today Spend"]), status:st, ended:/archiv|complete|ended|finished/.test(st) });
     });
     if(!rows.length) return null;
-    const hasLive = rows.some(r=>!r.ended);
-    const use = hasLive ? rows.filter(r=>!r.ended) : rows;
+    const use = pickTvsciSpendRows(rows);
     const b={life:0,daily:0,yest:0,today:0}; use.forEach(r=>{ b.life+=r.life; b.daily+=r.daily; b.yest+=r.yest; b.today+=r.today; });
     return { tvsciLifetimeSpend:b.life.toFixed(2), tvsciDailyBudget:b.daily.toFixed(2), tvsciYesterdaySpend:b.yest.toFixed(2), tvsciTodaySpend:b.today.toFixed(2) };
   }catch{ return null; }
@@ -9971,15 +9982,14 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       // row instead of the active $6,207/$147); multiple ACTIVE rows sum, archived-only keeps as-is.
       const rowsByName={};
       parseCsvRows(csv).forEach(r=>{ const n=String(r["Campaign Name"]||"").trim(); if(!n) return;
-        const st=String(r["Campaign Status"]||r["Status"]||"").trim();
+        const st=String(r["Campaign Status"]||r["Status"]||"").trim().toLowerCase();
         (rowsByName[n.toLowerCase()]=rowsByName[n.toLowerCase()]||[]).push({ life:num(r["Lifetime Spend"]), daily:num(r["Campaign Daily Budget"]), yest:num(r["Yesterday Spend"]), today:num(r["Today Spend"]), status:st, ended:/archiv|complete|ended|finished/i.test(st) });
       });
       Object.entries(rowsByName).forEach(([k,rws])=>{
-        const hasLive=rws.some(r=>!r.ended);
-        const use=hasLive?rws.filter(r=>!r.ended):rws;
+        const use=pickTvsciSpendRows(rws);
         const b={life:0,daily:0,yest:0,today:0};
         use.forEach(r=>{ b.life+=r.life; b.daily+=r.daily; b.yest+=r.yest; b.today+=r.today; });
-        b.status = hasLive ? "ACTIVE" : ((use[0]&&use[0].status)||"");
+        b.status = use.some(r=>r.status==="active") ? "ACTIVE" : ((use[0]&&use[0].status)||"");
         m[k]=b;
       });
     }catch{}
@@ -19348,18 +19358,17 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
         (rowsByCamp[key]=rowsByCamp[key]||[]).push({
           life:num(row["Lifetime Spend"]), daily:num(row["Campaign Daily Budget"]),
           yest:num(row["Yesterday Spend"]), today:num(row["Today Spend"]),
-          ended: /archiv|complete|ended|finished/.test(_status),
+          status:_status, ended: /archiv|complete|ended|finished/.test(_status),
         });
         memEntries.push({ csvName:getCampName(row,fileSource), campId:key, campName:fullPool.find(c=>String(c.id)===key)?.campaignName||"" });
       });
-      // Aggregate, dropping ENDED lines from a current campaign when a live line also maps. Keep everything
-      // when the tracker campaign is itself archived (closeout) OR when the ONLY line(s) mapped are ended
-      // (the campaign's own flight just finished) — so no real spend is ever lost.
+      // Aggregate, preferring the ACTIVE line(s) when several sheet rows map to one current campaign (so a
+      // paused/inactive/archived duplicate never inflates it — Austin: NW Qatar). Keep everything when the
+      // tracker campaign is itself archived (a closeout) so a finished flight's own spend is never lost.
       let _skipLines=0, _skipSpend=0;
       Object.entries(rowsByCamp).forEach(([key,rws])=>{
         const targetArchived = (typeof allArchivedIds!=="undefined") && allArchivedIds.has(key);
-        const hasLive = rws.some(r=>!r.ended);
-        const useRows = (!targetArchived && hasLive) ? rws.filter(r=>!r.ended) : rws;
+        const useRows = targetArchived ? rws : pickTvsciSpendRows(rws);
         rws.forEach(r=>{ if(!useRows.includes(r)){ _skipLines++; _skipSpend+=r.life; } });
         const b={life:0,daily:0,yest:0,today:0};
         useRows.forEach(r=>{ b.life+=r.life; b.daily+=r.daily; b.yest+=r.yest; b.today+=r.today; });
