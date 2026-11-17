@@ -29,7 +29,7 @@ const localStorage = (function(real){
 
 // Tracker build version — shown in a small footer badge so Austin can confirm which build is live. BUMP this
 // on every deploy (next letter same day, next date otherwise).
-const APP_VERSION = "v11/17/2026a";
+const APP_VERSION = "v11/17/2026b";
 const STORAGE_KEY = "campaign-tracker-v3";
 const ZEUS_KEY = "campaign-tracker-zeus";
 const EXPORT_KEY = "campaign-tracker-last-export";
@@ -10069,11 +10069,17 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   // the Metrics dropdown can still show "which line delivered what" to catch a mismap (Austin).
   const backupBreakdownByCamp = React.useMemo(()=>{
     const m={};
+    // Flight window per id (from the live campaign — backup records don't store start/end), so a breakdown saved
+    // for a month OUTSIDE this flight (e.g. a backfilled pre-flight month that collided onto a new flight's id)
+    // never surfaces as that campaign's per-line breakdown. Mirrors the priorMonths* flight clip.
+    const dates={}; (campaigns||[]).forEach(c=>{ if(c&&c.id!=null) dates[String(c.id)]={s:c.startDate?String(c.startDate).slice(0,7):null, e:c.endDate?String(c.endDate).slice(0,7):null}; });
     try{
       const backups = JSON.parse(localStorage.getItem(MONTHLY_BACKUP_KEY)||"{}")||{};
       Object.keys(backups).sort().forEach(mo=>{   // ascending — a later month OVERWRITES, so we end on the most recent
         const arr = backups[mo] && Array.isArray(backups[mo].campaigns) ? backups[mo].campaigns : [];
-        arr.forEach(r=>{ if(r && Array.isArray(r.breakdown) && r.breakdown.length) m[String(r.id)] = { month:mo, breakdown:r.breakdown }; });
+        arr.forEach(r=>{ if(!(r && Array.isArray(r.breakdown) && r.breakdown.length)) return;
+          const dd=dates[String(r.id)]; if(dd && ((dd.s && mo<dd.s)||(dd.e && mo>dd.e))) return;   // outside this flight
+          m[String(r.id)] = { month:mo, breakdown:r.breakdown }; });
       });
     }catch{}
     return m;
