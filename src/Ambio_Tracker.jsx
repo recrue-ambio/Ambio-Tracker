@@ -29,7 +29,7 @@ const localStorage = (function(real){
 
 // Tracker build version — shown in a small footer badge so Austin can confirm which build is live. BUMP this
 // on every deploy (next letter same day, next date otherwise).
-const APP_VERSION = "v11/17/2026c";
+const APP_VERSION = "v11/17/2026d";
 const STORAGE_KEY = "campaign-tracker-v3";
 const ZEUS_KEY = "campaign-tracker-zeus";
 const EXPORT_KEY = "campaign-tracker-last-export";
@@ -5183,6 +5183,7 @@ function Modal({ campaign, onSave, onClose, isNew, partners=[], reminders=[], se
   const [goalMode, setGoalMode] = useState(() => {
     if (campaign && Array.isArray(campaign.flightSegments) && campaign.flightSegments.length) return "dates";
     if (parseGoalSchedule((campaign && campaign.note1) || "").hasSchedule) return "month";
+    if (isNew) return "dates";   // NEW campaign defaults to ✈ Flights (Austin); editing an existing flat line stays flat
     return "flat";
   });
   const [scheduleGoals, setScheduleGoals] = useState({});     // month mode: {monthIdx: "50000"}
@@ -5708,11 +5709,15 @@ function Modal({ campaign, onSave, onClose, isNew, partners=[], reminders=[], se
                   const fmtKs = n => n>=1000000 ? (+(n/1000000).toFixed(2))+"M" : n>=1000 ? (+(n/1000).toFixed(n>=10000?0:1))+"K" : String(Math.round(n));
                   const dISPs = iso => { const m=(iso||"").match(/^(\d{4})-(\d{2})-(\d{2})/); return m?`${parseInt(m[2])}/${parseInt(m[3])}/${m[1].slice(2)}`:""; };
                   const daysIncl = (a,b) => { const [ay,am,ad]=a.split("-").map(Number),[by,bm,bd]=b.split("-").map(Number); return Math.round((new Date(by,bm-1,bd)-new Date(ay,am-1,ad))/86400000)+1; };
-                  // YouTube bills per-VIEW (CPV), so its goals are VIEWS, not impressions — label the builder
-                  // to match (defaults to views the moment the platform is YT). Everything else = impressions.
-                  const isViews = dealBasis(f)==="CPV";
-                  const unit = isViews ? "views" : "impr";
-                  const unitLong = isViews ? "views" : "impressions";
+                  // Ambio paces every campaign on $ SPEND vs its $ budget (pacingMetricFor → "spend"), so the
+                  // schedule goal is a DOLLAR budget per window, not impressions (Austin: "the goal is typically
+                  // spend, it asked me for impressions"). YouTube CPV would be views; plain impression goals stay
+                  // impressions. money=true → prefix the value with $ and label it budget.
+                  const money   = pacingMetricFor(f.platform, f.dealType) === "spend";
+                  const isViews  = !money && dealBasis(f)==="CPV";
+                  const unit     = money ? "$" : isViews ? "views" : "impr";
+                  const unitLong = money ? "budget ($)" : isViews ? "views" : "impressions";
+                  const fmtTot   = n => money ? "$"+fmtKs(n) : fmtKs(n)+" "+unit;   // "$72K" vs "72K impr"
                   const boxWrap = {marginTop:8,background:_lm?"#ebf6f1":"#061a17",border:`1px solid ${_lm?"#d5eae2":"#0b302c"}`,borderRadius:8,padding:"9px 11px"};
                   const numIn = {background:_lm?"#eaf5f1":"#0b2522",border:`1px solid ${_lm?"#b6dccf":"#182f2c"}`,borderRadius:5,padding:"5px 8px",color:_lm?"#0f172a":"#e3edec",fontSize:12,outline:"none"};
 
@@ -5728,7 +5733,7 @@ function Modal({ campaign, onSave, onClose, isNew, partners=[], reminders=[], se
                     const total = months.reduce((s,idx)=>s+(parseInt((scheduleGoals[idx]||"").toString().replace(/[,\s]/g,""))||0),0);
                     return (
                       <div style={boxWrap}>
-                        <div style={{fontSize:9,color:_lm?"#789e99":"#72b0a9",marginBottom:7,textTransform:"uppercase",letterSpacing:"0.05em",fontWeight:700}}>{isViews?"Views":"Impressions"} goal per month · piped straight into the pacing bars</div>
+                        <div style={{fontSize:9,color:_lm?"#789e99":"#72b0a9",marginBottom:7,textTransform:"uppercase",letterSpacing:"0.05em",fontWeight:700}}>{money?"Budget ($)":isViews?"Views":"Impressions"} per month · piped straight into the pacing bars</div>
                         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:7}}>
                           {months.map(idx => (
                             <div key={idx} style={{display:"flex",alignItems:"center",gap:6}}>
@@ -5741,7 +5746,7 @@ function Modal({ campaign, onSave, onClose, isNew, partners=[], reminders=[], se
                         </div>
                         <div style={{marginTop:8,paddingTop:7,borderTop:`1px solid ${_lm?"#d5eae2":"#0b302c"}`,display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:10}}>
                           <span style={{color:_lm?"#789e99":"#72b0a9"}}>{months.length} month{months.length!==1?"s":""} in flight</span>
-                          <span style={{color:_lm?"#1d4ed8":"#00d9ff",fontWeight:700}}>Flight total: {fmtKs(total)} {unit}</span>
+                          <span style={{color:_lm?"#1d4ed8":"#00d9ff",fontWeight:700}}>Flight total: {fmtTot(total)}</span>
                         </div>
                       </div>
                     );
@@ -5777,7 +5782,7 @@ function Modal({ campaign, onSave, onClose, isNew, partners=[], reminders=[], se
                               <span style={{color:_lm?"#97bab6":"#72b0a9",fontSize:11}}>→</span>
                               <div style={{width:150}}><DatePicker value={seg.end||""} onChange={v=>update(segments.map((s,j)=>j===i?{...s,end:v}:s))} placeholder="End date"/></div>
                               <input type="number" value={seg.goal||""} placeholder={unitLong} onChange={e=>update(segments.map((s,j)=>j===i?{...s,goal:e.target.value}:s))} style={{...numIn,flex:1,minWidth:90}}/>
-                              <span style={{fontSize:9,color:_lm?"#97bab6":"#72b0a9",width:78,textAlign:"right",flexShrink:0}}>{perDay>0?`${fmtKs(perDay)}/day`:(dd>0?`${dd}d`:"")}</span>
+                              <span style={{fontSize:9,color:_lm?"#97bab6":"#72b0a9",width:78,textAlign:"right",flexShrink:0}}>{perDay>0?`${money?"$":""}${fmtKs(perDay)}/day`:(dd>0?`${dd}d`:"")}</span>
                               {segments.length>1 && <button type="button" onClick={()=>update(segments.filter((_,j)=>j!==i))} style={{background:"transparent",border:"none",color:_lm?"#b6dccf":"#bfe3da",fontSize:14,cursor:"pointer",lineHeight:1,flexShrink:0}}>×</button>}
                             </div>
                           );
@@ -5785,7 +5790,7 @@ function Modal({ campaign, onSave, onClose, isNew, partners=[], reminders=[], se
                       </div>
                       <div style={{marginTop:8,paddingTop:7,borderTop:`1px solid ${_lm?"#d5eae2":"#0b302c"}`,display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:10,gap:8,flexWrap:"wrap"}}>
                         <button type="button" onClick={()=>update([...segments,{start:"",end:"",goal:""}])} style={{background:_lm?"#e5f2ed":"#0b302c",border:`1px solid ${_lm?"#bfe0d7":"#00d9ff40"}`,borderRadius:5,color:_lm?"#1d4ed8":"#00d9ff",fontSize:10,fontWeight:700,padding:"3px 10px",cursor:"pointer"}}>+ Add flight window</button>
-                        <span style={{color:_lm?"#1d4ed8":"#00d9ff",fontWeight:700}}>Total: {fmtKs(total)} {unit}</span>
+                        <span style={{color:_lm?"#1d4ed8":"#00d9ff",fontWeight:700}}>Total: {fmtTot(total)}</span>
                       </div>
                     </div>
                   );
