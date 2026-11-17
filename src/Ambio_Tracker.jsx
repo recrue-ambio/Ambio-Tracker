@@ -29,7 +29,7 @@ const localStorage = (function(real){
 
 // Tracker build version — shown in a small footer badge so Austin can confirm which build is live. BUMP this
 // on every deploy (next letter same day, next date otherwise).
-const APP_VERSION = "v11/16/2026f";
+const APP_VERSION = "v11/16/2026h";
 const STORAGE_KEY = "campaign-tracker-v3";
 const ZEUS_KEY = "campaign-tracker-zeus";
 const EXPORT_KEY = "campaign-tracker-last-export";
@@ -10657,6 +10657,10 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   const _spentNum = (v) => parseFloat(String(v==null?"":v).replace(/[$,\s]/g,"")) || 0;
   const spentOf = (c) => {
     const tv = _spentNum(c.tvsciLifetimeSpend); if (tv > 0) return tv;
+    // 💲 Spend view = sync-report ONLY: no check-in fallback, so "exclude $0 spend" hides a line with no synced
+    // spend (matching its $0 tvsci-only display) instead of keeping it alive on stale check-in data. The Metrics
+    // / Flights views still fall back to the latest snapshot MTD spend, then the manual spend field.
+    if (pacingView === "spend") return 0;
     const snap = c.ttdSnapshots?.mtd?.spend ?? c.metaSnapshots?.mtd?.spend ?? c.dspSnapshots?.mtd?.spend ?? c.googleSnapshots?.mtd?.spend ?? c.snapSnapshots?.mtd?.spend;
     const s = _spentNum(snap); if (s > 0) return s;
     return _spentNum(c.spend);
@@ -17724,7 +17728,7 @@ function QuickCheckInPanel({ campaigns, archive, setArchive, filtered, setCampai
   const addIgnore = (name)=>{ const nm=String(name||"").trim(); if(!nm) return; const now=Date.now(); setIgnoredNames(prev=>{ if(prev.some(e=>normIgnore(e.name)===normIgnore(nm))) return prev; const next=[...prev,{name:nm,addedAt:now,lastSeenAt:now}]; _persistIgnored(next); return next; }); };
   const removeIgnore = (name)=> setIgnoredNames(prev=>{ const next=prev.filter(e=>normIgnore(e.name)!==normIgnore(name)); _persistIgnored(next); return next; });
   const clearAllIgnored = ()=>{ setIgnoredNames([]); _persistIgnored([]); };
-  const [showIgnoredList, setShowIgnoredList] = React.useState(true); // open by default so the ignore list is visible on sight (Austin: "I need to be able to see the campaigns I ignored")
+  const [showIgnoredList, setShowIgnoredList] = React.useState(false); // COLLAPSED by default — the ignore list gets long (summer/off-season lines), so it's just a header chip "🚫 Ignored on check-in (N)" you click to open when needed (Austin: "hide these for now, make a little thing we can open up if we need to")
   const [ignoredSearch, setIgnoredSearch] = React.useState("");        // search box for the ignored list (can grow to 50+)
   // On each file drop: refresh lastSeen for ignored names present in the file. We DON'T auto-delete stale
   // entries — Austin wants the ignore list kept as a permanent safety net ("in case I ignore a campaign but
