@@ -29,7 +29,7 @@ const localStorage = (function(real){
 
 // Tracker build version — shown in a small footer badge so Austin can confirm which build is live. BUMP this
 // on every deploy (next letter same day, next date otherwise).
-const APP_VERSION = "v11/17/2026d";
+const APP_VERSION = "v11/17/2026e";
 const STORAGE_KEY = "campaign-tracker-v3";
 const ZEUS_KEY = "campaign-tracker-zeus";
 const EXPORT_KEY = "campaign-tracker-last-export";
@@ -3604,7 +3604,10 @@ function parseAmbioEduProposal(text){
     { re:/BRANDED\s+PAID\s+SEARCH|PAID\s+SEARCH\s*\(SEM\)/i, tactic:"SEM", platform:"SEM", sem:true },
   ];
   // All section headers (mapped + skipped: social, creative, grand-total) so each product's text is bounded.
-  const anyHeader=/(PERFORMANCE\s+TELEVISION|PREMIUM\s+RETARGETING|PROGRAMMATIC\s+RETARGETING|TARGETED\s+DISPLAY|DIGITAL\s+AUDIO\s+PLACEMENT|BRANDED\s+PAID\s+SEARCH|STORIES\s*&?\s*REELS|SNAP\w*|LINKED\s*IN|TIK\s*TOK|CREATIVE\s+DEVELOPMENT|AUDIENCE\s+SEGMENTS|Total\s+Marketing\s+Budget)/ig;
+  // "MOBILE TO SOCIAL" MUST be here even though it's skipped (social) — without it the PERFORMANCE TELEVISION
+  // section bled into Mobile's audience lines and `lastNum(Total Marketing Dollars)` grabbed the "59" out of
+  // "HOUSEHOLDS A21-59", so PTV media read $59 → $41 after the split instead of the real $15,300 → $10,710 (Austin).
+  const anyHeader=/(PERFORMANCE\s+TELEVISION|PREMIUM\s+RETARGETING|PROGRAMMATIC\s+RETARGETING|TARGETED\s+DISPLAY|MOBILE\s*TO\s*SOCIAL|DIGITAL\s+AUDIO\s+PLACEMENT|BRANDED\s+PAID\s+SEARCH|STORIES\s*&?\s*REELS|SNAP\w*|LINKED\s*IN|TIK\s*TOK|CREATIVE\s+DEVELOPMENT|AUDIENCE\s+SEGMENTS|Total\s+Marketing\s+Budget)/ig;
   const headers=[]; let hm; while((hm=anyHeader.exec(t))) headers.push({idx:hm.index, name:hm[1]});
   headers.sort((a,b)=>a.idx-b.idx);
 
