@@ -29,7 +29,7 @@ const localStorage = (function(real){
 
 // Tracker build version — shown in a small footer badge so Austin can confirm which build is live. BUMP this
 // on every deploy (next letter same day, next date otherwise).
-const APP_VERSION = "v11/17/2026b";
+const APP_VERSION = "v11/17/2026c";
 const STORAGE_KEY = "campaign-tracker-v3";
 const ZEUS_KEY = "campaign-tracker-zeus";
 const EXPORT_KEY = "campaign-tracker-last-export";
@@ -772,7 +772,8 @@ const _termHits = (c, t) => {
   const partner = (c.mediaPartner || "").toLowerCase();
   const plat    = (c.platform     || "").toLowerCase();
   const code    = partnerAbbrOf(c.mediaPartner, cachedPartnerAbbrMap()).toLowerCase();
-  return name.includes(t) || partner.includes(t) || plat.includes(t) || (!!code && code.includes(t));
+  const group   = (c.pacingGroup  || "").toLowerCase();   // so the search box also finds a pacing GROUP by name (Austin)
+  return name.includes(t) || partner.includes(t) || plat.includes(t) || (!!code && code.includes(t)) || (!!group && group.includes(t));
 };
 // `terms` = { include:[lc…], exclude:[lc…] } from buildSearchTerms.
 const campaignMatchesTerms = (c, terms) => {
@@ -3627,6 +3628,22 @@ function parseAmbioEduProposal(text){
 
   const stamp=(()=>{ const [y,m,d]=getToday().split("-"); return `${m}/${d}/${y}`; })();
   const drafts=[];
+  // Build one FEE draft. Ambio bills a MANAGEMENT FEE, not CPM: revenue = contractValue(gross) − budget(media).
+  const pushDraft=(tactic, platform, mediaV, grossV, imprV, groupName, extraNote)=>{
+    if(!(mediaV>0) && !(grossV>0)) return;
+    const fee = (grossV>0 && mediaV>0) ? Math.round((grossV-mediaV)*100)/100 : null;
+    drafts.push({
+      mediaPartner:"AMBIO",
+      campaignName:(label?label+" - ":"")+tactic,
+      platform, startDate:startIso, endDate:endIso,
+      status:"off", dealType:"FEE",
+      budget: mediaV>0?mediaV.toFixed(2):"", contractValue: grossV>0?grossV.toFixed(2):"",
+      goal:"", note1:"", pacingGroup: groupName||"",
+      note2:[fee!=null?`Mgmt fee $${fee.toFixed(2)}`:"", imprV?`~${Math.round(imprV).toLocaleString()} impr goal`:"", extraNote||""].filter(Boolean).join(" · "),
+      _fromProposal:true,
+      history:`${stamp} — From proposal${label?" ("+label+")":""}: ${tactic} — media $${(mediaV||0).toFixed(2)}, mgmt fee $${fee!=null?fee.toFixed(2):"?"}, contract $${(grossV||0).toFixed(2)}`,
+    });
+  };
   products.forEach(pr=>{
     const prod = MAP.find(mp => pr.names.some(n=>mp.re.test(n)));
     if(!prod) return;   // skipped product (social / creative / grand-total) — no mapped tactic
@@ -3640,20 +3657,16 @@ function parseAmbioEduProposal(text){
       impr=lastNum(sec,/Estimated\s+Impression\s+Goal/i);
     }
     if(!(media>0) && !(gross>0)) return;
-    // Ambio bills a MANAGEMENT FEE, not CPM: dealType FEE → revenue = contractValue(gross) − budget(media).
-    // The proposal states the gross + media per product, so the fee lands exactly on its stated mgmt fee.
-    const fee = (gross>0 && media>0) ? Math.round((gross-media)*100)/100 : null;
-    drafts.push({
-      mediaPartner:"AMBIO",
-      campaignName:(label?label+" - ":"")+prod.tactic,
-      platform:prod.platform, startDate:startIso, endDate:endIso,
-      status:"off", dealType:"FEE",
-      budget: media>0?media.toFixed(2):"", contractValue: gross>0?gross.toFixed(2):"",
-      goal:"", note1:"",
-      note2:[fee!=null?`Mgmt fee $${fee.toFixed(2)}`:"", impr?`~${impr.toLocaleString()} impr goal`:"", extra].filter(Boolean).join(" · "),
-      _fromProposal:true,
-      history:`${stamp} — From proposal${label?" ("+label+")":""}: ${prod.tactic} — media $${(media||0).toFixed(2)}, mgmt fee $${fee!=null?fee.toFixed(2):"?"}, contract $${(gross||0).toFixed(2)}`,
-    });
+    // Performance Television is a POOL Ambio runs as CTV/OTT + Display RT + Video RT. The proposal states ONE
+    // lump for it, so split on Austin's STANDARD 70% CTV/OTT · 15% Display RT · 15% Video RT and bind the three
+    // into one pacing group ("{client} – PTV") → they roll up to the combined budget in the 💲 Spend view.
+    if(prod.platform==="PTV"){
+      const grp = label ? (label+" – PTV") : "PTV";
+      [["CTV/OTT","PTV",0.70],["Display RT","DRT",0.15],["Video RT","VRT",0.15]].forEach(([tac,plat,frac])=>
+        pushDraft(tac, plat, media>0?media*frac:0, gross>0?gross*frac:0, impr?impr*frac:null, grp, `${Math.round(frac*100)}% of Performance TV`));
+      return;
+    }
+    pushDraft(prod.tactic, prod.platform, media, gross, impr, "", extra);
   });
 
   return { isProposal:true, client:label, campaignName:label, submitted:(t.match(/(\d{1,2}\/\d{1,2}\/\d{4})/)||[])[1]||"", drafts };
