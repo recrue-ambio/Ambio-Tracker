@@ -29,7 +29,7 @@ const localStorage = (function(real){
 
 // Tracker build version — shown in a small footer badge so Austin can confirm which build is live. BUMP this
 // on every deploy (next letter same day, next date otherwise).
-const APP_VERSION = "v11/16/2026h";
+const APP_VERSION = "v11/17/2026a";
 const STORAGE_KEY = "campaign-tracker-v3";
 const ZEUS_KEY = "campaign-tracker-zeus";
 const EXPORT_KEY = "campaign-tracker-last-export";
@@ -1937,11 +1937,18 @@ function computeMonthlyPacing(arg1, arg2, arg3) {
 // metric. Reads the monthly-backup store directly so it's usable from module scope.
 function priorMonthsDeliveredFromBackups(c, curMonthKey) {
   const mk = pacingMetricFor(c.platform, c.dealType);
+  // Only count backup months INSIDE this campaign's flight window. A backup from BEFORE the flight started (or
+  // after it ended) is not this flight's delivery — e.g. a NEW fall flight (11/1→4/30) must not inherit a stray
+  // September backup that landed on its id (summer data that collided on the shared campaign name). Austin:
+  // Manor's not-yet-live November flight was showing September's delivery as "served". Fail-safe: no dates → no clip.
+  const _fs = c.startDate ? String(c.startDate).slice(0,7) : null;
+  const _fe = c.endDate   ? String(c.endDate).slice(0,7)   : null;
   let sum = 0;
   try {
     const b = JSON.parse(localStorage.getItem(MONTHLY_BACKUP_KEY) || "{}");
     for (const mo in b) {
       if (!/^\d{4}-\d{2}$/.test(mo) || mo >= curMonthKey) continue;
+      if ((_fs && mo < _fs) || (_fe && mo > _fe)) continue;
       const rec = ((b[mo] && b[mo].campaigns) || []).find(r => String(r.id) === String(c.id));
       if (!rec) continue;
       if (mk === "views")      sum += parseInt(rec.videoViews) || 0;
@@ -1959,10 +1966,15 @@ function priorMonthsDeliveredFromBackups(c, curMonthKey) {
 // backups[prevMonth] writer), so these fields are available. Live MTD is added by the caller.
 function priorMonthsMetricsFromBackups(c, curMonthKey) {
   const out = { impr:0, clicks:0, spend:0, views:0, vcrImprNum:0 };
+  // Clip to the flight window — same reason as priorMonthsDeliveredFromBackups: a pre-flight (or post-flight)
+  // backup that collided onto this id must not feed the cumulative KPI columns (CTR/CPM/clicks) either.
+  const _fs = c.startDate ? String(c.startDate).slice(0,7) : null;
+  const _fe = c.endDate   ? String(c.endDate).slice(0,7)   : null;
   try {
     const b = JSON.parse(localStorage.getItem(MONTHLY_BACKUP_KEY) || "{}");
     for (const mo in b) {
       if (!/^\d{4}-\d{2}$/.test(mo) || mo >= curMonthKey) continue;
+      if ((_fs && mo < _fs) || (_fe && mo > _fe)) continue;
       const rec = ((b[mo] && b[mo].campaigns) || []).find(r => String(r.id) === String(c.id));
       if (!rec) continue;
       const im = parseInt(rec.impressions) || 0;
@@ -10869,9 +10881,14 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
   // double-count. Matched by stable campaign id.
   function priorMonthsDelivered(c) {
     const mk = pacingMetricFor(c.platform, c.dealType);
+    // Clip to the flight window so a pre-flight (or post-flight) backup that collided onto this id never counts
+    // as this flight's delivery (Austin: Manor's 11/1 fall flight was showing a September backup as "served").
+    const _fs = c.startDate ? String(c.startDate).slice(0,7) : null;
+    const _fe = c.endDate   ? String(c.endDate).slice(0,7)   : null;
     let sum = 0;
     for (const mo in lifeBackups) {
       if (!/^\d{4}-\d{2}$/.test(mo) || mo >= curMonthKey) continue;
+      if ((_fs && mo < _fs) || (_fe && mo > _fe)) continue;
       const recs = (lifeBackups[mo] && lifeBackups[mo].campaigns) || [];
       const rec = recs.find(r => String(r.id) === String(c.id));
       if (!rec) continue;
