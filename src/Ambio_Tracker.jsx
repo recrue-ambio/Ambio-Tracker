@@ -29,7 +29,7 @@ const localStorage = (function(real){
 
 // Tracker build version — shown in a small footer badge so Austin can confirm which build is live. BUMP this
 // on every deploy (next letter same day, next date otherwise).
-const APP_VERSION = "v11/17/2026e";
+const APP_VERSION = "v11/17/2026f";
 const STORAGE_KEY = "campaign-tracker-v3";
 const ZEUS_KEY = "campaign-tracker-zeus";
 const EXPORT_KEY = "campaign-tracker-last-export";
@@ -5293,6 +5293,22 @@ function Modal({ campaign, onSave, onClose, isNew, partners=[], reminders=[], se
   // On mount, seed whichever builder the campaign opened in.
   const scheduleSeeded = useRef(false);
   useEffect(() => { if (!scheduleSeeded.current) { if (goalMode==="month") seedSchedule(); else if (goalMode==="dates") seedSegments(); scheduleSeeded.current = true; } }, []);
+  // 💵 Media Spend IS the flight budget (Austin): mirror it into the single flight window as its spend goal —
+  // using whatever flight dates are set — so you don't enter the budget twice. Stops the moment you edit the
+  // schedule yourself (`flightGoalTouched`, flipped when you type a window amount or add/remove a window), and
+  // only for the FEE (Media-Spend) campaigns that have that field. Removing the Media Spend just stops filling.
+  const flightGoalTouched = useRef(false);
+  useEffect(() => {
+    if (goalMode !== "dates" || dealBasis(f) !== "FEE" || flightGoalTouched.current) return;
+    const b = Math.round(parseFloat(f.budget) || 0);
+    if (b <= 0 || segments.length > 1) return;
+    const prev = segments[0] || {};
+    const cur = parseInt((prev.goal||"").toString().replace(/[,\s]/g,""))||0;
+    if (cur === b) return;                                  // already mirrored → no-op (prevents any loop)
+    const seg = { start: prev.start || f.startDate || "", end: prev.end || f.endDate || "", goal: String(b) };
+    setSegments([seg]);
+    applySegmentsToForm([seg]);
+  }, [f.budget, f.startDate, f.endDate, goalMode]);
   // Flip auto-fill "ready" ONLY after the two auto-fill effects above have run their mount pass. Because
   // React runs effects in definition order, placing this LAST guarantees that on open those effects saw
   // autoFillReady=false and preserved the values the form loaded with (an IO draft's parsed CPM/CV, an
@@ -5784,15 +5800,15 @@ function Modal({ campaign, onSave, onClose, isNew, partners=[], reminders=[], se
                               <div style={{width:150}}><DatePicker value={seg.start||""} onChange={v=>update(segments.map((s,j)=>j===i?{...s,start:v}:s))} placeholder="Start date"/></div>
                               <span style={{color:_lm?"#97bab6":"#72b0a9",fontSize:11}}>→</span>
                               <div style={{width:150}}><DatePicker value={seg.end||""} onChange={v=>update(segments.map((s,j)=>j===i?{...s,end:v}:s))} placeholder="End date"/></div>
-                              <input type="number" value={seg.goal||""} placeholder={unitLong} onChange={e=>update(segments.map((s,j)=>j===i?{...s,goal:e.target.value}:s))} style={{...numIn,flex:1,minWidth:90}}/>
+                              <input type="number" value={seg.goal||""} placeholder={unitLong} onChange={e=>{ flightGoalTouched.current=true; update(segments.map((s,j)=>j===i?{...s,goal:e.target.value}:s)); }} style={{...numIn,flex:1,minWidth:90}}/>
                               <span style={{fontSize:9,color:_lm?"#97bab6":"#72b0a9",width:78,textAlign:"right",flexShrink:0}}>{perDay>0?`${money?"$":""}${fmtKs(perDay)}/day`:(dd>0?`${dd}d`:"")}</span>
-                              {segments.length>1 && <button type="button" onClick={()=>update(segments.filter((_,j)=>j!==i))} style={{background:"transparent",border:"none",color:_lm?"#b6dccf":"#bfe3da",fontSize:14,cursor:"pointer",lineHeight:1,flexShrink:0}}>×</button>}
+                              {segments.length>1 && <button type="button" onClick={()=>{ flightGoalTouched.current=true; update(segments.filter((_,j)=>j!==i)); }} style={{background:"transparent",border:"none",color:_lm?"#b6dccf":"#bfe3da",fontSize:14,cursor:"pointer",lineHeight:1,flexShrink:0}}>×</button>}
                             </div>
                           );
                         })}
                       </div>
                       <div style={{marginTop:8,paddingTop:7,borderTop:`1px solid ${_lm?"#d5eae2":"#0b302c"}`,display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:10,gap:8,flexWrap:"wrap"}}>
-                        <button type="button" onClick={()=>update([...segments,{start:"",end:"",goal:""}])} style={{background:_lm?"#e5f2ed":"#0b302c",border:`1px solid ${_lm?"#bfe0d7":"#00d9ff40"}`,borderRadius:5,color:_lm?"#1d4ed8":"#00d9ff",fontSize:10,fontWeight:700,padding:"3px 10px",cursor:"pointer"}}>+ Add flight window</button>
+                        <button type="button" onClick={()=>{ flightGoalTouched.current=true; update([...segments,{start:"",end:"",goal:""}]); }} style={{background:_lm?"#e5f2ed":"#0b302c",border:`1px solid ${_lm?"#bfe0d7":"#00d9ff40"}`,borderRadius:5,color:_lm?"#1d4ed8":"#00d9ff",fontSize:10,fontWeight:700,padding:"3px 10px",cursor:"pointer"}}>+ Add flight window</button>
                         <span style={{color:_lm?"#1d4ed8":"#00d9ff",fontWeight:700}}>Total: {fmtTot(total)}</span>
                       </div>
                     </div>
@@ -13264,7 +13280,21 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
                   {/* Metrics (full-grid) view adds CTR/VCR · Clicks · CPM/CPV · Budget · Freq — left blank on the
                       group header (rates don't aggregate; per-line values are on the member rows below). */}
                   {!spendOnly && <><div/><div/><div/><div/><div/></>}
-                  <div/>
+                  {/* Group pause/activate — flip the WHOLE group in one click instead of each line (Austin).
+                      Acts on ALL campaigns sharing this pacing group (by name), not just the visible rows, so a
+                      member hidden by a filter is still paused/activated. */}
+                  <div style={{display:"flex",justifyContent:"flex-end"}}>
+                    {(()=>{ const inGroup=c=>(c.pacingGroup||"").trim()===u.key;
+                      const anyActive=(campaigns||[]).some(c=>inGroup(c)&&(c.status||"active")==="active");
+                      return anyActive
+                        ? <button onClick={()=>{ (campaigns||[]).forEach(c=>{ if(inGroup(c)&&(c.status||"active")==="active") onSetStatus(c.id,"off"); }); }}
+                            title={`Pause the whole "${u.key}" group (all ${memTot} line${memTot!==1?"s":""})`}
+                            style={{background:lightMode?"#fef3c7":"#1a1208",border:`1px solid ${lightMode?"#f59e0b":"#f59e0b60"}`,borderRadius:4,color:lightMode?"#d97706":"#fbbf24",fontSize:11,padding:"2px 6px",cursor:"pointer",lineHeight:1,fontWeight:700,whiteSpace:"nowrap"}}>⏸</button>
+                        : <button onClick={()=>{ (campaigns||[]).forEach(c=>{ if(inGroup(c)&&(c.status||"active")!=="active") onSetStatus(c.id,"active"); }); }}
+                            title={`Activate the whole "${u.key}" group (all ${memTot} line${memTot!==1?"s":""})`}
+                            style={{background:lightMode?"#d1fae5":"#002e24",border:`1px solid ${lightMode?"#10b981":"#00c89660"}`,borderRadius:4,color:lightMode?"#024744":"#00d48a",fontSize:11,padding:"2px 6px",cursor:"pointer",lineHeight:1,fontWeight:700,whiteSpace:"nowrap"}}>▶</button>;
+                    })()}
+                  </div>
                 </div>
               );
             };
