@@ -29,7 +29,7 @@ const localStorage = (function(real){
 
 // Tracker build version — shown in a small footer badge so Austin can confirm which build is live. BUMP this
 // on every deploy (next letter same day, next date otherwise).
-const APP_VERSION = "v11/17/2026f";
+const APP_VERSION = "v11/18/2026b";
 const STORAGE_KEY = "campaign-tracker-v3";
 const ZEUS_KEY = "campaign-tracker-zeus";
 const EXPORT_KEY = "campaign-tracker-last-export";
@@ -735,10 +735,12 @@ function deriveTacticCode(label){
 // per the user's preference — he uses creative swaps, budget checks, and other most.
 // Removed Report Due and Campaign Ending — they weren't being used.
 const REMINDER_TYPES = [
-  { value:"other",        label:"📌 Other",           color:"#00d48a" },
-  { value:"ad-swap",      label:"🔄 Ad Swap",         color:"#f472b6" },
-  { value:"creative",     label:"🎨 Creative Update", color:"#a855f7" },
-  { value:"budget-check", label:"💰 Budget Check",    color:"#f97316" },
+  { value:"other",        label:"📌 Other",                color:"#00d48a" },
+  // Custom audiences expire every ~3 months (Austin) — a BLUE reminder to rebuild/refresh before they lapse.
+  // Kept 2nd (right after Other) at Austin's request. Ad Swap was removed — Creative Update covers it.
+  { value:"audience-exp", label:"👥 Audience Expiration",  color:"#3b82f6" },
+  { value:"creative",     label:"🎨 Creative Update",      color:"#a855f7" },
+  { value:"budget-check", label:"💰 Budget Check",         color:"#f97316" },
 ];
 const STATUS_CFG = {
   "active":        { label:"Active",        color:"#00d48a", bg:"#00200f" },
@@ -4439,6 +4441,7 @@ function CampaignNameCell({ c, reminders = [], onManageReminders = () => {}, onA
   const [pos, setPos] = useState({ left: 0, top: undefined, bottom: undefined });
   const [remNote, setRemNote] = useState("");
   const [remDate, setRemDate] = useState(() => getToday());
+  const [remType, setRemType] = useState("other");   // quick-add reminder type (Austin: let me pick the preset here)
   const [noteText, setNoteText] = useState("");
   const ref = useRef(null);
   useEffect(() => {
@@ -4469,8 +4472,8 @@ function CampaignNameCell({ c, reminders = [], onManageReminders = () => {}, onA
   function addReminderQuick() {
     const note = remNote.trim();
     if (!note) return;
-    onAddReminder({ id: Date.now(), type: "other", campaignId: c.id, note, date: remDate || getToday(), repeat: "none", dismissed: false });
-    setRemNote(""); setRemDate(getToday());
+    onAddReminder({ id: Date.now(), type: remType || "other", campaignId: c.id, note, date: remDate || getToday(), repeat: "none", dismissed: false });
+    setRemNote(""); setRemDate(getToday()); setRemType("other");
   }
   function addNoteQuick() {
     const t = noteText.trim();
@@ -4511,6 +4514,10 @@ function CampaignNameCell({ c, reminders = [], onManageReminders = () => {}, onA
             {/* Quick-add reminder — auto-linked to THIS campaign (no re-picking). */}
             <div style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 8 }}>
               <input value={remNote} onChange={e => setRemNote(e.target.value)} onKeyDown={e => { if (e.key === "Enter") addReminderQuick(); }} placeholder="Quick reminder…" style={qi} />
+              {/* Reminder type — so a preset (e.g. 👥 Audience Expiration) can be picked right here, not just the edit form (Austin). */}
+              <select value={remType} onChange={e => setRemType(e.target.value)} style={{ ...qi, cursor: "pointer" }}>
+                {REMINDER_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+              </select>
               <div style={{ display: "flex", gap: 5, alignItems: "stretch" }}>
                 <div style={{ flex: 1, minWidth: 0 }}><DatePicker value={remDate} onChange={v => setRemDate(v)} placeholder="Pick a date" /></div>
                 <button onClick={addReminderQuick} disabled={!remNote.trim()} style={{ ...qbtn, opacity: remNote.trim() ? 1 : 0.5, cursor: remNote.trim() ? "pointer" : "default", boxShadow: remNote.trim() ? "0 0 7px rgba(0,200,150,.55)" : "none" }}>+ Add</button>
