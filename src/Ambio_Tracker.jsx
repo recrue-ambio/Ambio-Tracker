@@ -29,7 +29,7 @@ const localStorage = (function(real){
 
 // Tracker build version — shown in a small footer badge so Austin can confirm which build is live. BUMP this
 // on every deploy (next letter same day, next date otherwise).
-const APP_VERSION = "v11/18/2026b";
+const APP_VERSION = "v11/24/2026a";
 const STORAGE_KEY = "campaign-tracker-v3";
 const ZEUS_KEY = "campaign-tracker-zeus";
 const EXPORT_KEY = "campaign-tracker-last-export";
@@ -4025,6 +4025,11 @@ function ReminderModal({ campaigns, archive=[], onClose, reminders, setReminders
   // "when I archive a campaign the reminder link to that campaign breaks — make it stick.")
   const campPool = [...campaigns, ...archive];
   const findCamp = (id) => campPool.find(c=>c.id===id) || null;
+  // Deduped pool for the searchable campaign picker (active wins over an archived copy sharing an id,
+  // so the dropdown never renders two options with the same React key).
+  const _activeIds = new Set(campaigns.map(c=>String(c.id)));
+  const pickerSearchPool = [...campaigns, ...archive.filter(a=>!_activeIds.has(String(a.id)))];
+  const archivedIdSet = new Set(archive.map(a=>String(a.id)));
   const isArchivedCamp = (id) => archive.some(a=>a.id===id);
   const [form, setForm] = useState(blank);
   const [view, setView] = useState("list");
@@ -4184,13 +4189,22 @@ function ReminderModal({ campaigns, archive=[], onClose, reminders, setReminders
             </div>
             <div style={{marginBottom:12}}>
               <label style={{display:"block",fontSize:10,color:_lm?"#527a75":"#d1ece5",marginBottom:4,textTransform:"uppercase",letterSpacing:"0.06em"}}>Campaign (optional)</label>
-              <select value={form.campaignId||""} onChange={e=>sf("campaignId",e.target.value?parseInt(e.target.value):"")} style={iS}>
-                <option value="">— No specific campaign —</option>
-                {campaigns.map(c=><option key={c.id} value={c.id}>{c.campaignName.trim()} · {c.platform} · {c.mediaPartner}</option>)}
-                {/* Keep an archived campaign selectable/visible when the reminder is already linked to it,
-                    so editing the reminder doesn't blank the link. */}
-                {form.campaignId && !campaigns.some(c=>c.id===form.campaignId) && (()=>{ const a=findCamp(form.campaignId); return a ? <option key={a.id} value={a.id}>{a.campaignName.trim()} · {a.platform} · {a.mediaPartner} (archived)</option> : null; })()}
-              </select>
+              {/* Searchable picker — the native <select> only type-ahead-jumped to the first letter (Austin).
+                  Reuses the Quick Check-in CampaignPicker: multi-term AND search across name + tactic +
+                  partner, with a color-coded tactic pill on every option. Default list = active campaigns;
+                  typing also searches archived ones (deduped) so a reminder can link to a finished flight. */}
+              <CampaignPicker
+                value={form.campaignId ? String(form.campaignId) : ""}
+                options={campaigns}
+                searchOptions={pickerSearchPool}
+                archivedIds={archivedIdSet}
+                onPick={(v)=>sf("campaignId", v ? parseInt(v,10) : "")}
+                onIgnore={()=>{}}
+                hideIgnore
+                lm={_lm}
+                placeholder="— No specific campaign —"
+                searchPlaceholder="Search campaigns — name, tactic, or partner…"
+              />
             </div>
             <div style={{marginBottom:12}}>
               <label style={{display:"block",fontSize:10,color:_lm?"#527a75":"#d1ece5",marginBottom:4,textTransform:"uppercase",letterSpacing:"0.06em"}}>Note</label>
@@ -17473,7 +17487,7 @@ function InitialsPrompt({ current, onSave, onClose }){
 // that opens a portal'd dropdown carrying its OWN search box. Empty search shows the smart candidates
 // (`options`); once you type, it searches the broader on-platform pool (`searchOptions`) so every matching
 // campaign (incl. archived) is reachable. Portal + fixed position so a scroll container can't clip it.
-function CampaignPicker({ value, options, searchOptions, archivedIds, onPick, onIgnore, lm, isUnmatched, rowLabel }){
+function CampaignPicker({ value, options, searchOptions, archivedIds, onPick, onIgnore, lm, isUnmatched, rowLabel, rowLabelTitle="Mapping file line", hideIgnore=false, placeholder="— leave unassigned —", searchPlaceholder="Type to filter campaigns…" }){
   const _lm = lm;
   const [open, setOpen] = React.useState(false);
   const [q, setQ] = React.useState("");
@@ -17524,15 +17538,15 @@ function CampaignPicker({ value, options, searchOptions, archivedIds, onPick, on
       {/* Which file row you're mapping — its OWN clearly-separated band (uppercase label on its own line, the
           file name below, allowed to WRAP) so the name is never clipped or crowded by the search box (Austin). */}
       {rowLabel && <div style={{padding:"8px 11px 9px", background:_lm?"#eef6f3":"#031512", borderBottom:`2px solid ${_lm?"#cfe6df":"#0d3630"}`}}>
-        <div style={{fontSize:8.5, fontWeight:800, letterSpacing:"0.06em", textTransform:"uppercase", color:_lm?"#6b9088":"#5f9a90", marginBottom:2}}>Mapping file line</div>
+        <div style={{fontSize:8.5, fontWeight:800, letterSpacing:"0.06em", textTransform:"uppercase", color:_lm?"#6b9088":"#5f9a90", marginBottom:2}}>{rowLabelTitle}</div>
         <div style={{fontSize:11.5, fontWeight:700, lineHeight:1.3, color:_lm?"#0f172a":"#e9f4f1", whiteSpace:"normal", wordBreak:"break-word"}}>{rowLabel}</div>
       </div>}
-      <input autoFocus value={q} onChange={e=>setQ(e.target.value)} placeholder="Type to filter campaigns…"
+      <input autoFocus value={q} onChange={e=>setQ(e.target.value)} placeholder={searchPlaceholder}
         onKeyDown={e=>{ if(e.key==="Enter"&&list.length===1){ onPick(String(list[0].id)); setOpen(false); } }}
         style={{border:"none", borderBottom:`1px solid ${_lm?"#c4e0d8":"#1d3a35"}`, background:_lm?"#f3f7f7":"#0b2522", color:_lm?"#0f172a":"#e6f3f0", fontSize:12, padding:"8px 10px", outline:"none"}}/>
       <div style={{overflowY:"auto"}}>
-        <div onClick={()=>{ onPick(""); setOpen(false); }} style={{...optSt, color:_lm?"#789e99":"#8fbfb6"}}>— leave unassigned —</div>
-        <div onClick={()=>{ onIgnore(); setOpen(false); }} style={{...optSt, color:"#ef4444", fontWeight:600}}>🚫 Ignore this campaign</div>
+        <div onClick={()=>{ onPick(""); setOpen(false); }} style={{...optSt, color:_lm?"#789e99":"#8fbfb6"}}>{placeholder}</div>
+        {!hideIgnore && <div onClick={()=>{ onIgnore(); setOpen(false); }} style={{...optSt, color:"#ef4444", fontWeight:600}}>🚫 Ignore this campaign</div>}
         {list.length===0 && <div style={{padding:"9px 10px", fontSize:11, color:_lm?"#789e99":"#8fbfb6"}}>No matches{qq?` for “${q.trim()}”`:""}</div>}
         {list.slice(0,300).map(c=>{ const sel=String(c.id)===String(value); return (
           <div key={c.id} onClick={()=>{ onPick(String(c.id)); setOpen(false); }}
@@ -17547,7 +17561,7 @@ function CampaignPicker({ value, options, searchOptions, archivedIds, onPick, on
       <button type="button" ref={btnRef} onClick={()=> open ? setOpen(false) : doOpen()}
         style={{background:bg, border:`1px solid ${bd}`, borderRadius:5, padding:"4px 7px", color:fg, fontSize:12, outline:"none", cursor:"pointer", width:"100%", textAlign:"left", display:"flex", alignItems:"center", gap:6}}>
         {assigned ? <>{pbadge(assigned.platform)}<span style={{flex:1, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{assigned.campaignName.trim()} <span style={{opacity:0.7}}>· {assigned.mediaPartner}</span></span></>
-                  : <span style={{flex:1, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>— leave unassigned —</span>}
+                  : <span style={{flex:1, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis"}}>{placeholder}</span>}
         <span style={{opacity:0.6, fontSize:10}}>▾</span>
       </button>
       {panel}
