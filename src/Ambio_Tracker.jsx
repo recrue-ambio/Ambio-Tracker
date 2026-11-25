@@ -29,7 +29,7 @@ const localStorage = (function(real){
 
 // Tracker build version — shown in a small footer badge so Austin can confirm which build is live. BUMP this
 // on every deploy (next letter same day, next date otherwise).
-const APP_VERSION = "v11/25/2026a";
+const APP_VERSION = "v11/25/2026b";
 const STORAGE_KEY = "campaign-tracker-v3";
 const ZEUS_KEY = "campaign-tracker-zeus";
 const EXPORT_KEY = "campaign-tracker-last-export";
@@ -13300,7 +13300,7 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
                   <div>
                     <div style={{position:"relative",background:lmBarTrk,borderRadius:4,height:10,overflow:"visible",marginBottom:2}}>
                       <div style={{background:col,height:"100%",width:Math.min(100,lp.pct*100)+"%",borderRadius:4}}/>
-                      {expPct!=null&&!lp.ended&&<div style={{position:"absolute",top:-4,left:Math.min(97,expPct)+"%",width:3,height:18,background:"#38bdf8",borderRadius:1,zIndex:3}}/>}
+                      {expPct!=null&&!lp.ended&&<div style={{position:"absolute",top:-4,left:Math.min(97,expPct)+"%",width:3,height:18,background:"#38bdf8",borderRadius:1,zIndex:3,boxShadow:"0 0 6px #38bdf8, 0 0 12px #38bdf888"}}/>}
                     </div>
                     <div style={{display:"flex",alignItems:"center",gap:5}}>
                       <span style={{fontSize:11,color:col,fontWeight:700}}>{(lp.pct*100).toFixed(1)}%</span>
