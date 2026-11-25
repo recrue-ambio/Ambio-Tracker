@@ -29,7 +29,7 @@ const localStorage = (function(real){
 
 // Tracker build version — shown in a small footer badge so Austin can confirm which build is live. BUMP this
 // on every deploy (next letter same day, next date otherwise).
-const APP_VERSION = "v11/24/2026a";
+const APP_VERSION = "v11/25/2026a";
 const STORAGE_KEY = "campaign-tracker-v3";
 const ZEUS_KEY = "campaign-tracker-zeus";
 const EXPORT_KEY = "campaign-tracker-last-export";
@@ -11835,6 +11835,12 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
       : rowPriorDateRaw;
     const col=pacing?.color??"#8fbfb6", pCol=PLT_COLORS[c.platform]||PLT_COLORS.default;
     const dr=daysRemaining(c), drc=daysRemainingColor(dr);
+    // Brighter, higher-contrast variant of the days-left colour for the small pacing-row chip — drc's
+    // pale default (#bfe3da) was hard to read at chip size. Keeps the red/amber urgency for ≤14d.
+    const drChip = dr==null ? drc
+      : dr<=7  ? (lightMode?"#dc2626":"#fca5a5")
+      : dr<=14 ? (lightMode?"#a16207":"#fde047")
+      :          (lightMode?"#0f766e":"#5eead4");
     const kpi=PLT_KPI[c.platform];
     const isVCR = kpi?.primary==="VCR";
 
@@ -12125,6 +12131,11 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
           <div style={{display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
             <span style={{fontSize:11,color:lmC(col),fontWeight:700}}>{(pacing.pct*100).toFixed(1)}%</span>
             {exp&&<span style={{fontSize:10,color:"#38bdf8aa"}}>/{(pacing.expectedPct*100).toFixed(0)}%</span>}
+            {/* Days remaining to the flight end, right under the white expected-tick (Austin: so he can
+                read days-left per line without flipping to the Campaigns tab). Colour = same days-left
+                urgency (drc) used on the flight end-date. */}
+            {dr!=null && dr>=0 && <span title={dr===0?"Flight ends today":`${dr} day${dr===1?"":"s"} left in the flight`}
+              style={{fontSize:10,fontWeight:800,color:drChip,background:lightMode?"#e6f4ef":"#07211d",border:`1px solid ${drChip}66`,borderRadius:3,padding:"0px 5px",whiteSpace:"nowrap"}}>{dr===0?"ends today":dr+"d left"}</span>}
             {pacing.pctRaw >= 1.10 && (
               <span title={`Delivered ${Math.round(pacing.pctRaw*100)}% of goal — overserving`}
                 style={{fontSize:9,fontWeight:700,color:lightMode?"#dc2626":"#fca5a5",background:lightMode?"#fee2e2":"#3a0010",border:`1px solid ${lightMode?"#ef4444":"#7f1d1d"}`,borderRadius:3,padding:"0px 5px",whiteSpace:"nowrap"}}>⚠ Over {Math.round(pacing.pctRaw*100)}%</span>
@@ -12148,9 +12159,11 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
               const _g = (pacing && pacing.flightBasis && pacing.goal) ? pacing.goal : monthlyGoal;
               return <div style={{display:"flex",flexDirection:"column",gap:1,alignItems:"flex-start"}}>
               <span style={{fontSize:13,fontWeight:700,color:"#00e5a0"}} title={`Goal: ${_g.toLocaleString()}`}>
+                {/* Exact goal — full value so it reconciles 1:1 against the Campaigns tab (Austin: was doing
+                    manual cross-checks, the "$2.6k" abbreviation couldn't be matched). Whole dollars, no cents. */}
                 {metricKind==="spend"
-                  ? "$"+(_g>=1000?(_g/1000).toFixed(1)+"k":_g.toFixed(0))
-                  : _g>=1000000?(_g/1000000).toFixed(2)+"M":_g>=1000?(_g/1000).toFixed(1)+"K":String(_g)}
+                  ? "$"+Math.round(_g).toLocaleString("en-US")
+                  : _g.toLocaleString("en-US")}
               </span>
               {_isFl && <span title={pacing&&pacing.flightBasis?"Whole-flight total goal — the row paces cumulative delivery across the flight dates":"This month's share of the total contract Goal, spread across the flight dates (no monthly goal in Note 1)"} style={{fontSize:8,fontWeight:700,color:lightMode?"#2563eb":"#b2cbc8",background:lightMode?"#d5eae2":"#0b302c",border:`1px solid ${lightMode?"#93c5fd":"#185851"}`,borderRadius:3,padding:"0px 4px",whiteSpace:"nowrap",letterSpacing:"0.02em"}}>✈ flight</span>}
             </div>; })()
@@ -13242,7 +13255,9 @@ function PacingDashboard({ campaigns=[], dateRange={preset:"mtd"}, setDateRange=
               {key:"ahead",label:"Ahead",color:"#f97316",units:vUnits.filter(u=>uBucket(u)==="ahead")},
               {key:"off",label:"Off",color:"#f87171",tint:true,units:vUnits.filter(u=>uBucket(u)==="off")},
             ];
-            const $m = n => (n<0?"-":"")+"$"+(Math.abs(n)>=1000?(Math.abs(n)/1000).toFixed(1)+"k":Math.round(Math.abs(n)));
+            // Group-header money: 2-decimal K so the combined rollups read precisely ($5.28k, not $5.3k) —
+            // Austin reconciles these group totals manually. Sub-$1k stays whole dollars.
+            const $m = n => (n<0?"-":"")+"$"+(Math.abs(n)>=1000?(Math.abs(n)/1000).toFixed(2)+"k":Math.round(Math.abs(n)));
             const GACC = "#00d9ff";
             const renderGroupHeader = (u) => {
               const lp=u.lp, col=lmC(lp.color), open=!groupCollapsed.has(u.key);
